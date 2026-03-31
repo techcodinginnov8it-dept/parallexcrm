@@ -21,6 +21,7 @@ interface DataTableProps<T> {
   data: T[];
   columns: ColumnDef<T>[];
   isLoading?: boolean;
+  maxVisibleRows?: number;
   pagination?: PaginationState;
   onPageChange?: (page: number) => void;
   onLimitChange?: (limit: number) => void;
@@ -35,6 +36,7 @@ export function DataTable<T>({
   data,
   columns,
   isLoading = false,
+  maxVisibleRows,
   pagination,
   onPageChange,
   onLimitChange,
@@ -66,14 +68,37 @@ export function DataTable<T>({
     onSelectionChange(newSet);
   };
 
+  const shouldScroll = Boolean(maxVisibleRows && data.length > maxVisibleRows);
+  const estimatedHeaderHeight = 48;
+  const estimatedRowHeight = 56;
+  const maxTableHeight =
+    shouldScroll && maxVisibleRows
+      ? `${estimatedHeaderHeight + (maxVisibleRows * estimatedRowHeight)}px`
+      : undefined;
+
   return (
     <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      <div style={{ overflowX: 'auto' }}>
+      <div
+        style={{
+          overflowX: 'auto',
+          overflowY: shouldScroll ? 'auto' : 'visible',
+          maxHeight: maxTableHeight,
+        }}
+      >
         <table className="data-table">
           <thead>
             <tr>
               {onSelectionChange && (
-                <th style={{ width: '40px', textAlign: 'center' }}>
+                <th
+                  style={{
+                    width: '40px',
+                    textAlign: 'center',
+                    position: shouldScroll ? 'sticky' : 'static',
+                    top: 0,
+                    zIndex: shouldScroll ? 2 : 'auto',
+                    background: shouldScroll ? 'var(--bg-surface)' : undefined,
+                  }}
+                >
                   <input 
                     type="checkbox" 
                     onChange={handleSelectAll} 
@@ -85,7 +110,13 @@ export function DataTable<T>({
                 <th 
                   key={idx} 
                   onClick={() => col.sortable && col.accessorKey && onSort?.(col.accessorKey)}
-                  style={{ cursor: col.sortable ? 'pointer' : 'default' }}
+                  style={{
+                    cursor: col.sortable ? 'pointer' : 'default',
+                    position: shouldScroll ? 'sticky' : 'static',
+                    top: 0,
+                    zIndex: shouldScroll ? 2 : 'auto',
+                    background: shouldScroll ? 'var(--bg-surface)' : undefined,
+                  }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                     {col.header}

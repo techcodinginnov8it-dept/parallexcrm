@@ -33,11 +33,14 @@ export async function GET(request: NextRequest) {
     console.log(`Searching Google Maps for: ${query} in ${displayLocation}`);
     const fullQuery = `${query} in ${displayLocation}`;
     const startedAt = Date.now();
-    const scraped = await scrapeGoogleMaps(fullQuery, limit, offset);
+    const scraped = await scrapeGoogleMaps(fullQuery, limit + 1, offset, 'fast_first');
     const elapsedMs = Date.now() - startedAt;
-    console.log(`Google Maps scrape completed in ${elapsedMs}ms for "${fullQuery}"`);
+    const visibleRows = scraped.slice(0, limit);
+    console.log(
+      `Google Maps scrape completed in ${elapsedMs}ms for "${fullQuery}" (mode=fast_first, rows=${visibleRows.length}, hasMore=${scraped.length > limit})`
+    );
 
-    const prospects = scraped.map((p, i) => ({
+    const prospects = visibleRows.map((p, i) => ({
       name: p.name || 'Unknown Business',
       website: p.website || null,
       address: p.address || null,
@@ -68,7 +71,7 @@ export async function GET(request: NextRequest) {
       source,
       page,
       limit,
-      hasMore: prospects.length === limit,
+      hasMore: scraped.length > limit,
     });
 
   } catch (error: any) {

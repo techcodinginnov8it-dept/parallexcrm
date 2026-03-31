@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { getCurrentUser, unauthorizedResponse } from '@/lib/api-utils';
+import { lookupGoogleMapsContactData } from '@/lib/scrapers/google-maps-scraper';
 
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/gi;
 const EMAIL_VALIDATION_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}$/i;
@@ -215,21 +216,40 @@ export async function POST(request: NextRequest) {
     const user = await getCurrentUser();
     if (!user) return unauthorizedResponse();
 
-    const { url, name } = await request.json();
-    if (!url) return NextResponse.json({ error: 'URL is required for enrichment' }, { status: 400 });
+    const { url, name, address } = await request.json();
+    let normalizedUrl = normalizeWebsiteUrl(url);
+    let resolvedAddress = typeof address === 'string' ? address : null;
+    let resultEmails: string[] = [];
 
-    const normalizedUrl = normalizeWebsiteUrl(url);
     if (!normalizedUrl) {
-      return NextResponse.json({ error: 'A valid website URL is required for enrichment' }, { status: 400 });
+      if (!name || typeof name !== 'string') {
+        return NextResponse.json(
+          { error: 'A business name or valid website URL is required for enrichment' },
+          { status: 400 }
+        );
+      }
+
+      console.log(`Enriching business lead via Google Maps detail lookup: ${name}`);
+      const googleMapsData = await lookupGoogleMapsContactData(name, resolvedAddress);
+      if (googleMapsData) {
+        normalizedUrl = normalizeWebsiteUrl(googleMapsData.website ?? null);
+        resolvedAddress = googleMapsData.address || resolvedAddress;
+        resultEmails = Array.isArray(googleMapsData.emails) ? googleMapsData.emails : [];
+      }
     }
 
-    console.log(`Enriching business lead via HTTP fetch: ${name} (${normalizedUrl})`);
-    const resultEmails = await scrapeEmailsFromWebsite(normalizedUrl);
+    if (normalizedUrl && resultEmails.length === 0) {
+      console.log(`Enriching business lead via HTTP fetch: ${name} (${normalizedUrl})`);
+      resultEmails = await scrapeEmailsFromWebsite(normalizedUrl);
+    }
+
     console.log(`Enrichment complete for ${name}. Found ${resultEmails.length} emails.`);
 
     return NextResponse.json({
       success: true,
       emails: resultEmails,
+      website: normalizedUrl,
+      address: resolvedAddress,
     });
 
   } catch (error: any) {

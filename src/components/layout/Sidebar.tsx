@@ -10,21 +10,21 @@ interface NavItem {
 }
 
 const mainNav: NavItem[] = [
-  { label: 'Home', icon: '🏠', href: '/' },
-  { label: 'Prospecting', icon: '🔍', href: '/prospect' },
-  { label: 'Sequences', icon: '✉️', href: '/sequences' },
-  { label: 'Plays', icon: '⚡', href: '/plays' },
+  { label: 'Home', icon: 'H', href: '/' },
+  { label: 'Prospecting', icon: 'P', href: '/prospect' },
+  { label: 'Sequences', icon: 'S', href: '/sequences' },
+  { label: 'Plays', icon: 'Y', href: '/plays' },
 ];
 
 const manageNav: NavItem[] = [
-  { label: 'Contacts', icon: '👤', href: '/contacts' },
-  { label: 'Companies', icon: '🏢', href: '/companies' },
-  { label: 'Deals', icon: '💼', href: '/deals' },
-  { label: 'Tasks', icon: '✅', href: '/tasks' },
+  { label: 'Contacts', icon: 'C', href: '/contacts' },
+  { label: 'Companies', icon: 'O', href: '/companies' },
+  { label: 'Deals', icon: 'D', href: '/deals' },
+  { label: 'Tasks', icon: 'T', href: '/tasks' },
 ];
 
 const insightsNav: NavItem[] = [
-  { label: 'Analytics', icon: '📊', href: '/analytics' },
+  { label: 'Analytics', icon: 'A', href: '/analytics' },
 ];
 
 interface SidebarProps {
@@ -32,6 +32,7 @@ interface SidebarProps {
     first_name?: string;
     last_name?: string;
     email?: string;
+    role?: string;
   } | null;
 }
 
@@ -111,7 +112,7 @@ export default function Sidebar({ user }: SidebarProps) {
             className={`sidebar-item ${isActive('/settings') ? 'active' : ''}`}
             id="nav-settings"
           >
-            <span className="sidebar-item-icon">⚙️</span>
+            <span className="sidebar-item-icon">G</span>
             <span>Settings</span>
           </Link>
         </div>
@@ -124,11 +125,13 @@ export default function Sidebar({ user }: SidebarProps) {
             <div className="sidebar-user-name">
               {user?.first_name || 'User'} {user?.last_name || ''}
             </div>
-            <div className="sidebar-user-email">{user?.email || ''}</div>
+            <div className="sidebar-user-email">
+              {user?.email || ''}
+              {user?.role ? ` | ${user.role}` : ''}
+            </div>
           </div>
         </Link>
       </div>
     </aside>
   );
 }
-

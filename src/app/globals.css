@@ -1095,6 +1095,127 @@ textarea.form-input {
   gap: var(--space-3);
 }
 
+.looking-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.prospect-inline-status {
+  margin-top: 0.9rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.looking-dots {
+  display: inline-flex;
+  min-width: 1.5rem;
+}
+
+.looking-dot {
+  display: inline-block;
+  opacity: 0.2;
+  animation: looking-dot-bounce 1s infinite ease-in-out;
+}
+
+@keyframes looking-dot-bounce {
+  0%, 80%, 100% {
+    opacity: 0.2;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-1px);
+  }
+}
+
+.prospect-chip-button {
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 0.35rem 0.8rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.prospect-chip-button:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-subtle);
+}
+
+.prospect-suggestions-dropdown {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgba(26, 29, 39, 0.96);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(14px);
+}
+
+.prospect-suggestion-item {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.prospect-suggestion-item:hover {
+  background: var(--bg-hover);
+  color: var(--primary);
+}
+
+.prospect-history-card {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  min-width: 180px;
+  padding: 0.8rem 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.prospect-history-card:hover {
+  border-color: var(--primary);
+  box-shadow: var(--shadow-md);
+}
+
+.prospect-history-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.prospect-history-meta {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
 /* ============================================
    UTILITY CLASSES
    ============================================ */

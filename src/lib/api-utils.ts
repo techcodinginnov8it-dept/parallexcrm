@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server';
 import prisma from '@/lib/db';
 import { randomUUID } from 'crypto';
 import { NextResponse } from 'next/server';
+import type { Role } from '@prisma/client';
 
 const USER_INCLUDE = { organization: true, team: true } as const;
 const UUID_REGEX =
@@ -101,6 +102,14 @@ async function getOrCreateOrganizationId(
   return null;
 }
 
+async function resolveInitialUserRole(organizationId: string): Promise<Role> {
+  const existingUserCount = await prisma.user.count({
+    where: { org_id: organizationId },
+  });
+
+  return existingUserCount === 0 ? 'admin' : 'member';
+}
+
 export async function getCurrentUser() {
   const supabase = await createClient();
   const authUser = await resolveAuthUser(supabase);
@@ -142,6 +151,7 @@ export async function getCurrentUser() {
   try {
     const organizationId = await getOrCreateOrganizationId(preferredDomain, orgName);
     if (!organizationId) return null;
+    const role = await resolveInitialUserRole(organizationId);
 
     const created = await prisma.user.create({
       data: {
@@ -150,7 +160,7 @@ export async function getCurrentUser() {
         first_name: firstName,
         last_name: lastName,
         org_id: organizationId,
-        role: 'admin',
+        role,
       },
       include: USER_INCLUDE,
     });
@@ -171,4 +181,12 @@ export async function getCurrentUser() {
 
 export function unauthorizedResponse() {
   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+}
+
+export function forbiddenResponse(message: string = 'Forbidden') {
+  return NextResponse.json({ error: message }, { status: 403 });
+}
+
+export function isAdminRole(role?: string | null) {
+  return role === 'admin';
 }

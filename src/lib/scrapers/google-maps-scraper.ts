@@ -12,12 +12,20 @@ export interface GoogleMapResult {
   category?: string | null;
 }
 
+export type GoogleMapsScrapeMode = 'fast_first' | 'full';
+
+interface FastFirstCardData {
+  name: string;
+  website: string | null;
+  fullText: string;
+}
+
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/gi;
 const EMAIL_VALIDATION_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}$/i;
 const MAX_EMAILS_PER_BUSINESS = 5;
 const ENRICHMENT_CONCURRENCY = 15;
 const TIMEOUT = 5000;
-const MAX_LIMIT = 50;
+const MAX_LIMIT = 60;
 const IGNORED_EMAIL_PREFIXES = ['noreply@', 'no-reply@', 'example@', 'test@'];
 const GOOGLE_OWNED_DOMAINS = [
   'google.com',
@@ -33,16 +41,18 @@ const MAPS_WEBSITE_SELECTORS = [
   'a[data-tooltip*="Website"]',
   'a[data-tooltip*="website"]',
 ];
+const MAPS_CARD_SELECTOR =
+  'div[role="feed"] > div:has(a.hfpxzc), div.Nv2PK:has(a.hfpxzc), div[role="article"]:has(a.hfpxzc)';
 
 const MAPS_NAVIGATION_ATTEMPTS = [
-  { waitUntil: 'domcontentloaded' as const, timeout: 18000 },
-  { waitUntil: 'load' as const, timeout: 25000 },
+  { waitUntil: 'commit' as const, timeout: 12000 },
+  { waitUntil: 'domcontentloaded' as const, timeout: 15000 },
 ];
 const MAPS_DETAIL_NAVIGATION_ATTEMPTS = [
-  { waitUntil: 'domcontentloaded' as const, timeout: 6000 },
-  { waitUntil: 'load' as const, timeout: 9000 },
+  { waitUntil: 'commit' as const, timeout: 3000 },
+  { waitUntil: 'domcontentloaded' as const, timeout: 5000 },
 ];
-const MAX_DETAIL_LOOKUPS = 4;
+const MAX_DETAIL_LOOKUPS = 2;
 const GENERIC_SINGLE_RESULT_NAMES = new Set([
   'results',
   'search results',
@@ -90,6 +100,84 @@ function normalizeMapsUrl(raw: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+function normalizeIdentityPart(value: string | null | undefined): string {
+  return (value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function buildResultIdentity(result: Pick<GoogleMapResult, 'name' | 'website' | 'address'>): string {
+  return [
+    normalizeIdentityPart(result.name),
+    normalizeIdentityPart(result.website),
+    normalizeIdentityPart(result.address),
+  ].join('|');
+}
+
+function buildBusinessLookupQuery(name: string, address?: string | null): string {
+  return [name.trim(), (address || '').trim()].filter(Boolean).join(' ');
+}
+
+function scoreLookupCandidate(
+  candidate: Pick<GoogleMapResult, 'name' | 'website' | 'address' | 'emails'>,
+  targetName: string,
+  targetAddress?: string | null
+): number {
+  const normalizedTargetName = normalizeIdentityPart(targetName);
+  const normalizedCandidateName = normalizeIdentityPart(candidate.name);
+  const normalizedTargetAddress = normalizeIdentityPart(targetAddress);
+  const normalizedCandidateAddress = normalizeIdentityPart(candidate.address);
+
+  let score = 0;
+
+  if (normalizedCandidateName === normalizedTargetName) {
+    score += 12;
+  } else if (
+    normalizedCandidateName.includes(normalizedTargetName) ||
+    normalizedTargetName.includes(normalizedCandidateName)
+  ) {
+    score += 8;
+  }
+
+  const targetNameTokens = normalizedTargetName.split(' ').filter(Boolean);
+  const overlappingNameTokens = targetNameTokens.filter((token) =>
+    normalizedCandidateName.includes(token)
+  );
+  score += overlappingNameTokens.length;
+
+  if (normalizedTargetAddress && normalizedCandidateAddress) {
+    if (normalizedCandidateAddress === normalizedTargetAddress) {
+      score += 6;
+    } else if (
+      normalizedCandidateAddress.includes(normalizedTargetAddress) ||
+      normalizedTargetAddress.includes(normalizedCandidateAddress)
+    ) {
+      score += 4;
+    }
+  }
+
+  if (candidate.website) score += 2;
+  if (candidate.emails.length > 0) score += 3;
+
+  return score;
+}
+
+function dedupeGoogleMapResults(results: GoogleMapResult[]): GoogleMapResult[] {
+  const seen = new Set<string>();
+  return results.filter((result) => {
+    const key = buildResultIdentity(result);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function buildGoogleMapsSearchUrls(query: string): string[] {
+  const encodedQuery = encodeURIComponent(query);
+  return [
+    `https://www.google.com/maps/search/?api=1&query=${encodedQuery}&hl=en`,
+    `https://www.google.com/maps/search/${encodedQuery}?hl=en`,
+  ];
 }
 
 function shouldKeepEmail(email: string): boolean {
@@ -180,6 +268,103 @@ async function extractWebsiteFromMapsCard(card: Locator): Promise<string | null>
   }
 
   return null;
+}
+
+function parseMapsCardText(fullText: string): { address: string | null; category: string | null } {
+  const lines = fullText.split('\n').filter((line) => line.trim().length > 0);
+  const detailSeparatorRegex = /[\u00B7\u2022]|\u00C2\u00B7/;
+  const detailLine = lines.find((line) => detailSeparatorRegex.test(line));
+
+  if (detailLine) {
+    const parts = detailLine.split(detailSeparatorRegex).map((part) => part.trim());
+    return {
+      category: parts[0] || null,
+      address: parts[1] || null,
+    };
+  }
+
+  return {
+    category: null,
+    address: lines.length > 2 ? lines[2] : null,
+  };
+}
+
+async function extractFastFirstCardData(page: Page): Promise<FastFirstCardData[]> {
+  const extracted = await page.$$eval(
+    MAPS_CARD_SELECTOR,
+    (elements, payload) => {
+      const normalizeHost = (hostname: string) => hostname.replace(/^www\./i, '').toLowerCase();
+      const isGoogleOwned = (url: string) => {
+        try {
+          const host = normalizeHost(new URL(url).hostname);
+          return payload.googleOwnedDomains.some(
+            (domain) => host === domain || host.endsWith(`.${domain}`)
+          );
+        } catch {
+          return true;
+        }
+      };
+
+      const normalizeWebsite = (raw: string | null) => {
+        if (!raw) return null;
+        const trimmed = raw.trim();
+        if (!trimmed) return null;
+
+        const tryParse = (value: string) => {
+          try {
+            const parsed = new URL(value);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+            return parsed.toString();
+          } catch {
+            return null;
+          }
+        };
+
+        return tryParse(trimmed) ?? tryParse(`https://${trimmed}`);
+      };
+
+      return elements.map((element) => {
+        const card = element as HTMLElement;
+        const businessLink = card.querySelector('a.hfpxzc');
+        const name =
+          businessLink?.getAttribute('aria-label')?.trim() ||
+          businessLink?.textContent?.trim() ||
+          '';
+
+        let website: string | null = null;
+        for (const selector of payload.websiteSelectors) {
+          const href = card.querySelector(selector)?.getAttribute('href') || null;
+          const normalized = normalizeWebsite(href);
+          if (normalized && !isGoogleOwned(normalized)) {
+            website = normalized;
+            break;
+          }
+        }
+
+        return {
+          name,
+          website,
+          fullText: card.innerText || card.textContent || '',
+        };
+      });
+    },
+    {
+      websiteSelectors: MAPS_WEBSITE_SELECTORS,
+      googleOwnedDomains: GOOGLE_OWNED_DOMAINS,
+    }
+  );
+
+  const seen = new Set<string>();
+  return extracted.filter((card) => {
+    const key = [
+      normalizeIdentityPart(card.name),
+      normalizeIdentityPart(card.website),
+      normalizeIdentityPart(card.fullText),
+    ].join('|');
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function extractWebsiteFromMapsPlacePage(page: Page): Promise<string | null> {
@@ -383,15 +568,19 @@ async function enrichResultsWithEmails(results: GoogleMapResult[]): Promise<Goog
 async function navigateToGoogleMaps(
   page: Page,
   url: string,
-  attempts: ReadonlyArray<{ waitUntil: 'domcontentloaded' | 'load'; timeout: number }> = MAPS_NAVIGATION_ATTEMPTS
+  attempts: ReadonlyArray<{ waitUntil: 'commit' | 'domcontentloaded' | 'load'; timeout: number }> = MAPS_NAVIGATION_ATTEMPTS
 ): Promise<void> {
   let lastError: unknown;
 
   for (let i = 0; i < attempts.length; i++) {
     const attempt = attempts[i];
     try {
+      console.log(
+        `Google Maps navigation attempt ${i + 1}/${attempts.length} (${attempt.waitUntil}, ${attempt.timeout}ms)`
+      );
       await page.goto(url, { waitUntil: attempt.waitUntil, timeout: attempt.timeout });
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(700);
+      console.log(`Google Maps navigation succeeded on attempt ${i + 1}/${attempts.length}`);
       return;
     } catch (error) {
       lastError = error;
@@ -408,10 +597,43 @@ async function navigateToGoogleMaps(
   throw new Error(`Google Maps navigation timed out after retries: ${details}`);
 }
 
+export async function lookupGoogleMapsContactData(
+  name: string,
+  address?: string | null
+): Promise<Partial<GoogleMapResult> | null> {
+  const normalizedName = name.trim();
+  if (!normalizedName) return null;
+
+  const lookupQuery = buildBusinessLookupQuery(normalizedName, address);
+  const candidates = await scrapeGoogleMaps(lookupQuery, 5, 0, 'full');
+  if (candidates.length === 0) return null;
+
+  const rankedCandidates = candidates
+    .map((candidate) => ({
+      candidate,
+      score: scoreLookupCandidate(candidate, normalizedName, address),
+    }))
+    .sort((left, right) => right.score - left.score);
+
+  const bestMatch = rankedCandidates[0]?.candidate;
+  if (!bestMatch) return null;
+
+  return {
+    name: bestMatch.name || normalizedName,
+    website: bestMatch.website || null,
+    address: bestMatch.address || address || null,
+    emails: Array.isArray(bestMatch.emails) ? bestMatch.emails : [],
+    category: bestMatch.category || null,
+    rating: bestMatch.rating || null,
+    reviews: bestMatch.reviews || null,
+  };
+}
+
 export async function scrapeGoogleMaps(
   query: string,
   maxResults: number = 20,
-  offset: number = 0
+  offset: number = 0,
+  mode: GoogleMapsScrapeMode = 'fast_first'
 ): Promise<GoogleMapResult[]> {
   let browser: Browser | null = null;
   let detailPage: Page | null = null;
@@ -428,7 +650,9 @@ export async function scrapeGoogleMaps(
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     });
     const page: Page = await context.newPage();
-    detailPage = await context.newPage();
+    if (mode === 'full') {
+      detailPage = await context.newPage();
+    }
 
     // Block heavy resources for faster Maps Scraping
     const routeHandler = (route: any) => {
@@ -441,11 +665,29 @@ export async function scrapeGoogleMaps(
     };
     
     await page.route('**/*', routeHandler);
-    await detailPage.route('**/*', routeHandler);
+    if (detailPage) {
+      await detailPage.route('**/*', routeHandler);
+    }
 
-    const url = `https://www.google.com/maps/search/${encodeURIComponent(query)}?hl=en`;
-    console.log(`Navigating to Google Maps: ${url}`);
-    await navigateToGoogleMaps(page, url);
+    const candidateUrls = buildGoogleMapsSearchUrls(query);
+    let navigated = false;
+    let lastNavigationError: unknown = null;
+
+    for (const url of candidateUrls) {
+      try {
+        console.log(`Navigating to Google Maps: ${url}`);
+        await navigateToGoogleMaps(page, url);
+        navigated = true;
+        break;
+      } catch (error) {
+        lastNavigationError = error;
+        console.warn(`Google Maps primary URL failed, trying next fallback...`);
+      }
+    }
+
+    if (!navigated) {
+      throw (lastNavigationError as Error) || new Error('Google Maps navigation failed.');
+    }
 
     const currentUrl = page.url();
     if (currentUrl.includes('consent.google.com') || currentUrl.includes('/sorry/')) {
@@ -459,8 +701,15 @@ export async function scrapeGoogleMaps(
         page.locator('a.hfpxzc').count(),
       ]);
 
+      if (attempt === 0 || attempt === 4 || attempt === 9 || attempt === 14 || attempt === 19) {
+        console.log(
+          `Polling Google Maps results ${attempt + 1}/20 (feed=${feedCount}, cards=${cardCount})`
+        );
+      }
+
       if (feedCount > 0 || cardCount > 0) {
         hasListResults = true;
+        console.log(`Detected Google Maps results list (feed=${feedCount}, cards=${cardCount})`);
         break;
       }
 
@@ -476,34 +725,31 @@ export async function scrapeGoogleMaps(
         const name = await page.locator('h1').first().innerText().catch(() => '');
         const website = await extractWebsiteFromMapsPlacePage(page);
         const address = await extractAddressFromMapsPlacePage(page);
-        const fullPageContent = await page.content().catch(() => '');
-        const fullPageText = await page.locator('body').innerText().catch(() => '');
-        const mailtoEmails = await extractMailtoEmails(page);
-        const protectedEmails = await extractCloudflareEmails(page);
-        const emails = mergeEmailSets(
-          extractEmails(fullPageContent),
-          extractEmails(fullPageText),
-          mailtoEmails,
-          protectedEmails
-        );
+        const emails =
+          mode === 'full'
+            ? mergeEmailSets(
+                extractEmails(await page.content().catch(() => '')),
+                extractEmails(await page.locator('body').innerText().catch(() => '')),
+                await extractMailtoEmails(page),
+                await extractCloudflareEmails(page)
+              )
+            : [];
 
         const cleanName = name.trim();
-        const hasUsefulContactData = Boolean(website || address || emails.length > 0);
+        const hasUsefulContactData = Boolean(website || address || (mode === 'full' && emails.length > 0));
 
-      if (cleanName && startAt === 0 && isLikelyBusinessName(cleanName) && hasUsefulContactData) {
+        if (cleanName && startAt === 0 && isLikelyBusinessName(cleanName) && hasUsefulContactData) {
           return [{ name, website, address, emails }];
         }
       }
       return [];
     }
 
-    const cards = page.locator(
-      'div[role="feed"] > div:has(a.hfpxzc), div.Nv2PK:has(a.hfpxzc), div[role="article"]:has(a.hfpxzc)'
-    );
+    const cards = page.locator(MAPS_CARD_SELECTOR);
     let prevCount = 0;
     let retries = 0;
 
-    while (prevCount < targetCount && retries < 6) {
+    while (prevCount < targetCount && retries < 4) {
       const currentCards = await cards.count();
       if (currentCards >= targetCount || currentCards === prevCount) {
         retries++;
@@ -521,12 +767,62 @@ export async function scrapeGoogleMaps(
         await page.mouse.wheel(0, 2400).catch(() => undefined);
       }
 
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(900);
     }
 
     const count = await cards.count();
-    const results: GoogleMapResult[] = [];
     const endAt = Math.min(count, startAt + safeLimit);
+
+    console.log(
+      `Preparing fast-first result slice (cards=${count}, start=${startAt}, end=${endAt}, limit=${safeLimit})`
+    );
+
+    if (mode === 'fast_first') {
+      let extractedCards = await extractFastFirstCardData(page);
+      let lastUniqueCount = extractedCards.length;
+      let uniqueRetries = 0;
+
+      while (extractedCards.length < startAt + safeLimit && uniqueRetries < 4) {
+        const feedHandle = await page.locator('div[role="feed"]').first().elementHandle().catch(() => null);
+        if (feedHandle) {
+          await page.evaluate((el) => {
+            if (el) el.scrollBy(0, 2000);
+          }, feedHandle);
+        } else {
+          await page.mouse.wheel(0, 2400).catch(() => undefined);
+        }
+
+        await page.waitForTimeout(900);
+        extractedCards = await extractFastFirstCardData(page);
+        if (extractedCards.length <= lastUniqueCount) {
+          uniqueRetries++;
+        } else {
+          uniqueRetries = 0;
+        }
+        lastUniqueCount = extractedCards.length;
+      }
+
+      console.log(`Fast-first card extraction completed (uniqueCards=${extractedCards.length})`);
+
+      const fastFirstResults = extractedCards
+        .slice(startAt, startAt + safeLimit)
+        .map((card) => {
+          const parsed = parseMapsCardText(card.fullText);
+          return {
+            name: card.name || 'Unknown Business',
+            website: card.website || null,
+            address: parsed.address || null,
+            emails: [],
+            category: parsed.category || null,
+          } satisfies GoogleMapResult;
+        })
+        .filter((result) => isLikelyBusinessName(result.name));
+
+      const dedupedFastFirstResults = dedupeGoogleMapResults(fastFirstResults);
+      console.log(`Returning fast-first rows=${dedupedFastFirstResults.length}`);
+      return dedupedFastFirstResults;
+    }
+    const results: GoogleMapResult[] = [];
     let detailLookups = 0;
 
     for (let i = startAt; i < endAt; i++) {
@@ -540,28 +836,18 @@ export async function scrapeGoogleMaps(
       let website = await extractWebsiteFromMapsCard(card);
 
       const fullText = await card.innerText().catch(() => '');
-      const lines = fullText.split('\n').filter((line) => line.trim().length > 0);
-      let emails = extractEmails(fullText).slice(0, MAX_EMAILS_PER_BUSINESS);
-
-      let address: string | null = null;
-      let category: string | null = null;
-
-      const detailSeparatorRegex = /[\u00B7\u2022]|\u00C2\u00B7/;
-      const detailLine = lines.find((line) => detailSeparatorRegex.test(line));
-      if (detailLine) {
-        const parts = detailLine.split(detailSeparatorRegex).map((part) => part.trim());
-        category = parts[0] || null;
-        address = parts[1] || null;
-      } else if (lines.length > 2) {
-        address = lines[2];
-      }
+      let emails: string[] = extractEmails(fullText).slice(0, MAX_EMAILS_PER_BUSINESS);
+      const parsedCard = parseMapsCardText(fullText);
+      let address: string | null = parsedCard.address;
+      let category: string | null = parsedCard.category;
 
       // Some map cards do not expose website/email directly, so fetch place details as fallback.
       if (
+        mode === 'full' &&
         detailPage &&
         mapsPlaceUrl &&
         detailLookups < MAX_DETAIL_LOOKUPS &&
-        (!website || !address)
+        !website
       ) {
         detailLookups++;
         const detail = await scrapeMapsPlaceDetails(detailPage, mapsPlaceUrl);
@@ -582,7 +868,7 @@ export async function scrapeGoogleMaps(
       });
     }
 
-    return enrichResultsWithEmails(results);
+    return dedupeGoogleMapResults(await enrichResultsWithEmails(results));
   } catch (error) {
     console.error('Google Maps scraping failed:', error);
     throw error;

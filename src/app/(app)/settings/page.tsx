@@ -1,10 +1,24 @@
-export default function SettingsPage() {
+import { redirect } from 'next/navigation';
+import { getCurrentUser } from '@/lib/api-utils';
+import SettingsClient from './SettingsClient';
+
+export default async function SettingsPage() {
+  const user = await getCurrentUser();
+
+  if (!user) {
+    redirect('/login');
+  }
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-      <h1 style={{ margin: 0 }}>Settings</h1>
-      <p style={{ color: 'var(--text-secondary)', margin: 0 }}>
-        Account and workspace settings UI is coming soon.
-      </p>
-    </div>
+    <SettingsClient
+      currentUser={{
+        id: user.id,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        email: user.email,
+        role: user.role,
+        organizationName: user.organization?.name,
+      }}
+    />
   );
 }

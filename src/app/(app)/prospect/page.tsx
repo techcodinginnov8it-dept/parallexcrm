@@ -10,7 +10,7 @@ interface ProspectResult {
   website: string | null;
   address: string | null;
   emails: string[];
-  status: 'found' | 'enriching' | 'enriched' | 'saved' | 'unavailable';
+  status: 'found' | 'enriching' | 'enriched' | 'stored' | 'saved' | 'unavailable';
   category?: string;
   source?: 'google_maps';
   rating?: string | null;
@@ -39,26 +39,28 @@ interface ProspectSessionSnapshot {
 
 interface ProspectHistoryEntry {
   key: string;
+  searchId: string;
   category: string;
   locationLabel: string;
   updatedAt: string;
   resultCount: number;
-  snapshot: ProspectSessionSnapshot;
 }
+
+type ProspectResultSource = 'saved' | 'fresh' | 'mixed';
 
 const SCRAPE_STEPS = [
   'Connecting to Google Maps',
   'Collecting businesses from map results',
   'Visiting business websites for contact emails',
 ];
-const ITEMS_PER_PAGE = 20;
+const DEFAULT_ITEMS_PER_PAGE = 20;
+const ADMIN_ITEMS_PER_PAGE = 100;
 const AUTO_ENRICH_CONCURRENCY = 3;
+const AUTO_SAVE_CONCURRENCY = 2;
 const LOOKING_DOT_COUNT = 4;
 const ENRICHMENT_REQUEST_TIMEOUT_MS = 20000;
 const RELATED_QUERY_SUFFIXES = ['company', 'business', 'provider', 'consultant', 'solutions'];
 const MAX_SEARCH_HISTORY = 8;
-const PROSPECT_SESSION_STORAGE_KEY = 'parallexcrm-prospect-session';
-const PROSPECT_HISTORY_STORAGE_KEY = 'parallexcrm-prospect-history';
 const BUSINESS_CATEGORY_SUGGESTIONS = [
   'IT services',
   'Software companies',
@@ -127,7 +129,17 @@ function LookingIndicator() {
   );
 }
 
+function formatProspectResultSourceLabel(resultSource?: string | null): string {
+  if (resultSource === 'saved') return 'Loaded from saved leads';
+  if (resultSource === 'fresh') return 'Scraped fresh leads';
+  if (resultSource === 'mixed') return 'Loaded from saved leads + Scraped fresh leads';
+  return 'Scraped fresh leads';
+}
+
 export default function ProspectingPage() {
+  const [itemsPerPage, setItemsPerPage] = useState(DEFAULT_ITEMS_PER_PAGE);
+  const [hasResolvedRole, setHasResolvedRole] = useState(false);
+  const [isAdminUser, setIsAdminUser] = useState(false);
   const [query, setQuery] = useState('');
   const [location, setLocation] = useState(''); // Fallback/General
   const [city, setCity] = useState('');
@@ -145,14 +157,17 @@ export default function ProspectingPage() {
   const [activeQueryTerm, setActiveQueryTerm] = useState('');
   const [queryVariantIndex, setQueryVariantIndex] = useState(0);
   const [searchHistory, setSearchHistory] = useState<ProspectHistoryEntry[]>([]);
-  const [hasHydratedStorage, setHasHydratedStorage] = useState(false);
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [isSavingSelected, setIsSavingSelected] = useState(false);
   const [showCategorySuggestions, setShowCategorySuggestions] = useState(false);
   const [showCountrySuggestions, setShowCountrySuggestions] = useState(false);
   const autoEnrichQueueRef = useRef<ProspectResult[]>([]);
+  const autoSaveQueueRef = useRef<ProspectResult[]>([]);
   const activeEnrichmentsRef = useRef(new Set<string>());
+  const queuedEnrichmentsRef = useRef(new Set<string>());
+  const activeAutoSavesRef = useRef(new Set<string>());
   const attemptedEnrichmentsRef = useRef(new Set<string>());
+  const queuedAutoSavesRef = useRef(new Set<string>());
   const shouldPromoteHistoryRef = useRef(false);
   const isMountedRef = useRef(false);
   const resultsRef = useRef<ProspectResult[]>([]);
@@ -165,8 +180,6 @@ export default function ProspectingPage() {
   const lastScrapeSummaryRef = useRef('');
   const isSearchingRef = useRef(false);
   const searchErrorRef = useRef('');
-  const searchHistoryRef = useRef<ProspectHistoryEntry[]>([]);
-  const latestSessionTimestampRef = useRef(0);
   const categoryInputRef = useRef<HTMLDivElement | null>(null);
   const countryInputRef = useRef<HTMLDivElement | null>(null);
 
@@ -174,6 +187,42 @@ export default function ProspectingPage() {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const res = await fetch('/api/user/me');
+        const data = await res.json().catch(() => null);
+
+        if (!res.ok || cancelled) {
+          if (!cancelled) {
+            setItemsPerPage(DEFAULT_ITEMS_PER_PAGE);
+            setIsAdminUser(false);
+            setHasResolvedRole(true);
+          }
+          return;
+        }
+
+        const nextIsAdmin = data?.data?.role === 'admin';
+
+        setIsAdminUser(nextIsAdmin);
+        setItemsPerPage(nextIsAdmin ? ADMIN_ITEMS_PER_PAGE : DEFAULT_ITEMS_PER_PAGE);
+        setHasResolvedRole(true);
+      } catch {
+        if (!cancelled) {
+          setItemsPerPage(DEFAULT_ITEMS_PER_PAGE);
+          setIsAdminUser(false);
+          setHasResolvedRole(true);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -231,10 +280,6 @@ export default function ProspectingPage() {
   }, [searchError]);
 
   useEffect(() => {
-    searchHistoryRef.current = searchHistory;
-  }, [searchHistory]);
-
-  useEffect(() => {
     const validRowKeys = new Set(
       results
         .filter((row) => shouldDisplayProspect(row))
@@ -255,7 +300,7 @@ export default function ProspectingPage() {
     const nextQuery = (queryOverride || searchContext.query).trim();
     let url =
       `/api/prospect/search?query=${encodeURIComponent(nextQuery)}` +
-      `&page=${page}&limit=${ITEMS_PER_PAGE}`;
+      `&page=${page}&limit=${itemsPerPage}`;
     if (searchContext.city) url += `&city=${encodeURIComponent(searchContext.city)}`;
     if (searchContext.country) url += `&country=${encodeURIComponent(searchContext.country)}`;
     if (!searchContext.city && !searchContext.country && searchContext.location) {
@@ -308,7 +353,18 @@ export default function ProspectingPage() {
     prospect.source_id || `${prospect.name}|${prospect.website || ''}|${prospect.address || ''}`;
 
   const shouldAutoEnrich = (prospect: ProspectResult) =>
-    Boolean(prospect.name) && prospect.emails.length === 0 && prospect.status !== 'saved';
+    Boolean(prospect.name) &&
+    prospect.emails.length === 0 &&
+    prospect.status !== 'saved' &&
+    prospect.status !== 'stored' &&
+    prospect.status !== 'unavailable';
+
+  const shouldAutoSave = (prospect: ProspectResult) =>
+    Boolean(prospect.name) &&
+    Boolean(prospect.source_id) &&
+    prospect.emails.length > 0 &&
+    prospect.status !== 'saved' &&
+    prospect.status !== 'stored';
 
   const shouldDisplayProspect = (prospect: ProspectResult) =>
     prospect.emails.length > 0 || prospect.status === 'enriching';
@@ -318,6 +374,7 @@ export default function ProspectingPage() {
     emails: string[]
   ): ProspectResult['status'] => {
     if (rawStatus === 'saved') return 'saved';
+    if (rawStatus === 'stored') return 'stored';
     if (rawStatus === 'unavailable') return 'unavailable';
     if (emails.length > 0) return 'enriched';
     if (rawStatus === 'enriching') return 'enriching';
@@ -397,6 +454,49 @@ export default function ProspectingPage() {
   const parseApiError = (data: any, fallback: string) =>
     data?.details ? `${data.error}: ${data.details}` : data?.error || fallback;
 
+  const areSearchContextsEqual = (
+    left: ProspectSearchContext | null,
+    right: ProspectSearchContext | null
+  ) => {
+    if (left === right) return true;
+    if (!left || !right) return false;
+
+    return (
+      left.query === right.query &&
+      left.location === right.location &&
+      left.city === right.city &&
+      left.country === right.country
+    );
+  };
+
+  const areProspectRowsEquivalent = (
+    left: ProspectResult[],
+    right: ProspectResult[]
+  ) => {
+    if (left === right) return true;
+    if (left.length !== right.length) return false;
+
+    return left.every((row, index) => {
+      const other = right[index];
+      if (!other) return false;
+
+      const sameEmails =
+        row.emails.length === other.emails.length &&
+        row.emails.every((email, emailIndex) => email === other.emails[emailIndex]);
+
+      return (
+        getRowKey(row) === getRowKey(other) &&
+        row.name === other.name &&
+        row.website === other.website &&
+        row.address === other.address &&
+        row.status === other.status &&
+        row.category === other.category &&
+        row.rating === other.rating &&
+        sameEmails
+      );
+    });
+  };
+
   const buildSessionSnapshot = (
     overrides: Partial<ProspectSessionSnapshot> = {}
   ): ProspectSessionSnapshot | null => {
@@ -418,51 +518,22 @@ export default function ProspectingPage() {
     };
   };
 
-  const upsertHistoryEntry = (
-    existingEntries: ProspectHistoryEntry[],
-    snapshot: ProspectSessionSnapshot,
-    promoteToTop: boolean
-  ) => {
-    if (!snapshot.activeSearch) return existingEntries;
+  const fetchSearchHistory = async () => {
+    try {
+      const response = await fetch('/api/prospect/history', { cache: 'no-store' });
+      const data = await response.json().catch(() => null);
 
-    const key = getSearchHistoryKey(snapshot.activeSearch);
-    if (!key) return existingEntries;
+      if (!response.ok) return;
 
-    const nextEntry: ProspectHistoryEntry = {
-      key,
-      category: snapshot.activeSearch.query,
-      locationLabel: getSearchLocationLabel(snapshot.activeSearch),
-      updatedAt: new Date().toISOString(),
-      resultCount: snapshot.results.length,
-      snapshot,
-    };
+      const historyEntries = Array.isArray(data?.data)
+        ? data.data.slice(0, MAX_SEARCH_HISTORY)
+        : [];
 
-    const existingIndex = existingEntries.findIndex((entry) => entry.key === key);
-
-    if (existingIndex === -1) {
-      return [nextEntry, ...existingEntries].slice(0, MAX_SEARCH_HISTORY);
-    }
-
-    if (promoteToTop) {
-      return [nextEntry, ...existingEntries.filter((entry) => entry.key !== key)].slice(0, MAX_SEARCH_HISTORY);
-    }
-
-    const nextEntries = [...existingEntries];
-    nextEntries[existingIndex] = nextEntry;
-    return nextEntries;
-  };
-
-  const persistSession = (snapshot: ProspectSessionSnapshot, promoteToTop: boolean) => {
-    if (typeof window === 'undefined') return;
-
-    latestSessionTimestampRef.current = snapshot.updatedAt;
-    window.localStorage.setItem(PROSPECT_SESSION_STORAGE_KEY, JSON.stringify(snapshot));
-    const nextHistory = upsertHistoryEntry(searchHistoryRef.current, snapshot, promoteToTop);
-    searchHistoryRef.current = nextHistory;
-    window.localStorage.setItem(PROSPECT_HISTORY_STORAGE_KEY, JSON.stringify(nextHistory));
-
-    if (isMountedRef.current) {
-      setSearchHistory(nextHistory);
+      if (isMountedRef.current) {
+        setSearchHistory(historyEntries);
+      }
+    } catch {
+      // Ignore temporary history fetch issues.
     }
   };
 
@@ -471,51 +542,69 @@ export default function ProspectingPage() {
     options?: { resumeQueue?: boolean }
   ) => {
     if (!snapshot.activeSearch) return;
+    const nextActiveSearch = snapshot.activeSearch;
 
     const baseRows = reviveStoredRows(snapshot.results);
-    const shouldResumeQueue = Boolean(options?.resumeQueue) || hasPendingEnrichment(baseRows);
+    const shouldResumeQueue = Boolean(options?.resumeQueue);
     const restoredRows = shouldResumeQueue
       ? markRowsForAutoEnrichment(baseRows)
       : baseRows;
-
-    latestSessionTimestampRef.current = snapshot.updatedAt || Date.now();
-    activeSearchRef.current = snapshot.activeSearch;
-    activeQueryTermRef.current = snapshot.activeQueryTerm || snapshot.activeSearch.query;
-    queryVariantIndexRef.current = snapshot.queryVariantIndex || 0;
-    searchIdRef.current = snapshot.searchId || null;
-    currentPageRef.current = snapshot.currentPage || 1;
-    hasMoreResultsRef.current = Boolean(snapshot.hasMoreResults);
-    lastScrapeSummaryRef.current =
+    const nextActiveQueryTerm = snapshot.activeQueryTerm || nextActiveSearch.query;
+    const nextQueryVariantIndex = snapshot.queryVariantIndex || 0;
+    const nextSearchId = snapshot.searchId || null;
+    const nextCurrentPage = snapshot.currentPage || 1;
+    const nextHasMoreResults = Boolean(snapshot.hasMoreResults);
+    const nextLastScrapeSummary =
       snapshot.lastScrapeSummary ||
-      `Restored saved search for ${snapshot.activeSearch.query}.`;
+      `Restored saved search for ${nextActiveSearch.query}.`;
+    const nextSearchError = snapshot.searchError || '';
+    const nextIsSearching = Boolean(snapshot.isSearching);
+
+    const isSameSnapshot =
+      areSearchContextsEqual(activeSearchRef.current, nextActiveSearch) &&
+      activeQueryTermRef.current === nextActiveQueryTerm &&
+      queryVariantIndexRef.current === nextQueryVariantIndex &&
+      searchIdRef.current === nextSearchId &&
+      currentPageRef.current === nextCurrentPage &&
+      hasMoreResultsRef.current === nextHasMoreResults &&
+      lastScrapeSummaryRef.current === nextLastScrapeSummary &&
+      searchErrorRef.current === nextSearchError &&
+      isSearchingRef.current === nextIsSearching &&
+      areProspectRowsEquivalent(resultsRef.current, restoredRows);
+
+    if (isSameSnapshot && !shouldResumeQueue) {
+      return;
+    }
+
+    activeSearchRef.current = nextActiveSearch;
+    activeQueryTermRef.current = nextActiveQueryTerm;
+    queryVariantIndexRef.current = nextQueryVariantIndex;
+    searchIdRef.current = nextSearchId;
+    currentPageRef.current = nextCurrentPage;
+    hasMoreResultsRef.current = nextHasMoreResults;
+    lastScrapeSummaryRef.current = nextLastScrapeSummary;
     resultsRef.current = restoredRows;
-    isSearchingRef.current = Boolean(snapshot.isSearching);
-    searchErrorRef.current = snapshot.searchError || '';
+    isSearchingRef.current = nextIsSearching;
+    searchErrorRef.current = nextSearchError;
 
     if (isMountedRef.current) {
-      setQuery(snapshot.activeSearch.query);
-      setLocation(snapshot.activeSearch.location);
-      setCity(snapshot.activeSearch.city);
-      setCountry(snapshot.activeSearch.country);
-      setResults(restoredRows);
-      setSearchId(snapshot.searchId || null);
-      setActiveSearch(snapshot.activeSearch);
-      setActiveQueryTerm(snapshot.activeQueryTerm || snapshot.activeSearch.query);
-      setQueryVariantIndex(snapshot.queryVariantIndex || 0);
-      setCurrentPage(snapshot.currentPage || 1);
-      setHasMoreResults(Boolean(snapshot.hasMoreResults));
-      setLastScrapeSummary(
-        snapshot.lastScrapeSummary ||
-          `Restored saved search for ${snapshot.activeSearch.query}.`
-      );
-      setSearchError(snapshot.searchError || '');
-      setIsSearching(Boolean(snapshot.isSearching));
+      setQuery((prev) => (prev === nextActiveSearch.query ? prev : nextActiveSearch.query));
+      setLocation((prev) => (prev === nextActiveSearch.location ? prev : nextActiveSearch.location));
+      setCity((prev) => (prev === nextActiveSearch.city ? prev : nextActiveSearch.city));
+      setCountry((prev) => (prev === nextActiveSearch.country ? prev : nextActiveSearch.country));
+      setResults((prev) => (areProspectRowsEquivalent(prev, restoredRows) ? prev : restoredRows));
+      setSearchId((prev) => (prev === nextSearchId ? prev : nextSearchId));
+      setActiveSearch((prev) => (areSearchContextsEqual(prev, nextActiveSearch) ? prev : nextActiveSearch));
+      setActiveQueryTerm((prev) => (prev === nextActiveQueryTerm ? prev : nextActiveQueryTerm));
+      setQueryVariantIndex((prev) => (prev === nextQueryVariantIndex ? prev : nextQueryVariantIndex));
+      setCurrentPage((prev) => (prev === nextCurrentPage ? prev : nextCurrentPage));
+      setHasMoreResults((prev) => (prev === nextHasMoreResults ? prev : nextHasMoreResults));
+      setLastScrapeSummary((prev) => (prev === nextLastScrapeSummary ? prev : nextLastScrapeSummary));
+      setSearchError((prev) => (prev === nextSearchError ? prev : nextSearchError));
+      setIsSearching((prev) => (prev === nextIsSearching ? prev : nextIsSearching));
     }
 
     if (shouldResumeQueue) {
-      autoEnrichQueueRef.current = [];
-      activeEnrichmentsRef.current.clear();
-      attemptedEnrichmentsRef.current.clear();
       queueAutoEnrichment(restoredRows);
     }
   };
@@ -525,7 +614,6 @@ export default function ProspectingPage() {
     options?: { promoteToTop?: boolean; resumeQueue?: boolean }
   ) => {
     applySessionSnapshot(snapshot, { resumeQueue: options?.resumeQueue });
-    persistSession(snapshot, Boolean(options?.promoteToTop));
   };
 
   const restoreSnapshot = (
@@ -541,92 +629,21 @@ export default function ProspectingPage() {
   const syncResultsSnapshot = (
     updater: (rows: ProspectResult[]) => ProspectResult[]
   ) => {
-    const nextRows = updater(resultsRef.current);
-    const snapshot = buildSessionSnapshot({ results: nextRows });
-    if (!snapshot) return;
+    const nextRows = dedupeProspectRows(updater(resultsRef.current));
+    if (areProspectRowsEquivalent(resultsRef.current, nextRows)) {
+      return;
+    }
 
     resultsRef.current = nextRows;
+
     if (isMountedRef.current) {
       setResults(nextRows);
     }
-    persistSession(snapshot, false);
   };
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    try {
-      const storedHistory = window.localStorage.getItem(PROSPECT_HISTORY_STORAGE_KEY);
-      if (storedHistory) {
-        const parsedHistory = JSON.parse(storedHistory);
-        if (Array.isArray(parsedHistory)) {
-          setSearchHistory(parsedHistory.filter((entry) => entry?.snapshot?.activeSearch));
-        }
-      }
-
-      const storedSession = window.localStorage.getItem(PROSPECT_SESSION_STORAGE_KEY);
-      if (storedSession) {
-        const parsedSession = JSON.parse(storedSession) as ProspectSessionSnapshot;
-        if (parsedSession?.activeSearch) {
-          latestSessionTimestampRef.current = parsedSession.updatedAt || Date.now();
-          restoreSnapshot(parsedSession, {
-            resumeQueue:
-              Boolean(parsedSession.isSearching) || hasPendingEnrichment(parsedSession.results || []),
-          });
-        }
-      }
-    } catch {
-      window.localStorage.removeItem(PROSPECT_SESSION_STORAGE_KEY);
-      window.localStorage.removeItem(PROSPECT_HISTORY_STORAGE_KEY);
-    } finally {
-      setHasHydratedStorage(true);
-    }
+    void fetchSearchHistory();
   }, []);
-
-  useEffect(() => {
-    if (!hasHydratedStorage) return;
-    const snapshot = buildSessionSnapshot();
-    if (!snapshot) return;
-
-    persistSession(snapshot, shouldPromoteHistoryRef.current);
-    shouldPromoteHistoryRef.current = false;
-  }, [
-    hasHydratedStorage,
-    activeSearch,
-    activeQueryTerm,
-    queryVariantIndex,
-    searchId,
-    currentPage,
-    hasMoreResults,
-    lastScrapeSummary,
-    results,
-    isSearching,
-    searchError,
-  ]);
-
-  useEffect(() => {
-    if (!hasHydratedStorage || typeof window === 'undefined') return;
-
-    const interval = window.setInterval(() => {
-      try {
-        const storedSession = window.localStorage.getItem(PROSPECT_SESSION_STORAGE_KEY);
-        if (!storedSession) return;
-
-        const parsedSession = JSON.parse(storedSession) as ProspectSessionSnapshot;
-        if (!parsedSession?.activeSearch) return;
-        if ((parsedSession.updatedAt || 0) <= latestSessionTimestampRef.current) return;
-
-        applySessionSnapshot(parsedSession, {
-          resumeQueue:
-            Boolean(parsedSession.isSearching) || hasPendingEnrichment(parsedSession.results || []),
-        });
-      } catch {
-        // Ignore temporary parsing issues.
-      }
-    }, 1200);
-
-    return () => window.clearInterval(interval);
-  }, [hasHydratedStorage]);
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {
@@ -651,6 +668,7 @@ export default function ProspectingPage() {
       if (!prospect) break;
 
       const rowKey = getRowKey(prospect);
+      queuedEnrichmentsRef.current.delete(rowKey);
       if (activeEnrichmentsRef.current.has(rowKey)) continue;
 
       activeEnrichmentsRef.current.add(rowKey);
@@ -665,12 +683,13 @@ export default function ProspectingPage() {
             headers: { 'Content-Type': 'application/json' },
             signal: controller.signal,
             body: JSON.stringify({
+              leadId: prospect.source_id,
               url: prospect.website,
               name: prospect.name,
               address: prospect.address,
             }),
           });
-          const data = await res.json();
+          const data = await res.json().catch(() => null);
           const emails = res.ok && Array.isArray(data.emails) ? data.emails : [];
           const website = res.ok && typeof data.website === 'string' ? data.website : prospect.website;
           const address = res.ok && typeof data.address === 'string' ? data.address : prospect.address;
@@ -703,30 +722,147 @@ export default function ProspectingPage() {
     }
   };
 
+  const saveLeadToDatabase = async (prospect: ProspectResult) => {
+    const response = await fetch('/api/prospect/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        leadId: prospect.source_id,
+        name: prospect.name,
+        website: prospect.website,
+        address: prospect.address,
+        emails: prospect.emails,
+      }),
+    });
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw new Error(data?.error || 'Failed to save lead to database');
+    }
+  };
+
+  const convertProspectToCRM = async (prospect: ProspectResult) => {
+    const response = await fetch('/api/leads/convert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        leadId: prospect.source_id,
+        name: prospect.name,
+        website: prospect.website,
+        address: prospect.address,
+        emails: prospect.emails,
+      }),
+    });
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw new Error(data?.error || 'Failed to save lead to CRM');
+    }
+
+    return data;
+  };
+
+  const pumpAutoSaveQueue = () => {
+    while (
+      activeAutoSavesRef.current.size < AUTO_SAVE_CONCURRENCY &&
+      autoSaveQueueRef.current.length > 0
+    ) {
+      const prospect = autoSaveQueueRef.current.shift();
+      if (!prospect) break;
+
+      const rowKey = getRowKey(prospect);
+      queuedAutoSavesRef.current.delete(rowKey);
+
+      if (activeAutoSavesRef.current.has(rowKey) || prospect.status === 'saved') {
+        continue;
+      }
+
+        activeAutoSavesRef.current.add(rowKey);
+
+      void (async () => {
+        try {
+          await saveLeadToDatabase(prospect);
+          syncResultsSnapshot((prev) =>
+            prev.map((row) =>
+              getRowKey(row) === rowKey
+                ? { ...row, status: 'stored' }
+                : row
+            )
+          );
+        } catch (err: any) {
+          setSearchError(err?.message || 'Failed to save lead to database');
+        } finally {
+          activeAutoSavesRef.current.delete(rowKey);
+          pumpAutoSaveQueue();
+        }
+      })();
+    }
+  };
+
+  const queueAutoSave = (rows: ProspectResult[]) => {
+    const candidates = rows.filter((row) => {
+      if (!shouldAutoSave(row)) return false;
+      const rowKey = getRowKey(row);
+      if (activeAutoSavesRef.current.has(rowKey) || queuedAutoSavesRef.current.has(rowKey)) {
+        return false;
+      }
+
+      queuedAutoSavesRef.current.add(rowKey);
+      return true;
+    });
+
+    if (candidates.length === 0) return;
+
+    autoSaveQueueRef.current.push(...candidates);
+    pumpAutoSaveQueue();
+  };
+
   const queueAutoEnrichment = (rows: ProspectResult[]) => {
+    const candidateRowKeys = new Set<string>();
     const freshCandidates = rows.filter((row) => {
       if (!shouldAutoEnrich(row)) return false;
       const rowKey = getRowKey(row);
       if (
         attemptedEnrichmentsRef.current.has(rowKey) ||
-        activeEnrichmentsRef.current.has(rowKey)
+        activeEnrichmentsRef.current.has(rowKey) ||
+        queuedEnrichmentsRef.current.has(rowKey) ||
+        candidateRowKeys.has(rowKey)
       ) {
         return false;
       }
 
+      candidateRowKeys.add(rowKey);
       attemptedEnrichmentsRef.current.add(rowKey);
+      queuedEnrichmentsRef.current.add(rowKey);
       return true;
     });
 
     if (freshCandidates.length === 0) return;
 
+    syncResultsSnapshot((prev) =>
+      prev.map((row) =>
+        candidateRowKeys.has(getRowKey(row)) && row.status !== 'enriching'
+          ? { ...row, status: 'enriching' }
+          : row
+      )
+    );
     autoEnrichQueueRef.current.push(...freshCandidates);
     pumpAutoEnrichmentQueue();
   };
 
+  useEffect(() => {
+    queueAutoSave(results);
+  }, [results]);
+
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     setSearchError('');
+
+    if (!hasResolvedRole) {
+      setSearchError('Loading your account search limit. Please wait a moment, then try again.');
+      return;
+    }
+
     const submittedSearch = createSearchContext();
     if (!submittedSearch.query || (!submittedSearch.location && !submittedSearch.city && !submittedSearch.country)) {
       setSearchError('Enter a business category and at least one location field before scraping.');
@@ -737,8 +873,12 @@ export default function ProspectingPage() {
     setScrapeStepIndex(0);
     setSelectedRows(new Set());
     autoEnrichQueueRef.current = [];
+    autoSaveQueueRef.current = [];
     activeEnrichmentsRef.current.clear();
+    queuedEnrichmentsRef.current.clear();
+    activeAutoSavesRef.current.clear();
     attemptedEnrichmentsRef.current.clear();
+    queuedAutoSavesRef.current.clear();
     const searchStartSnapshot = buildSessionSnapshot({
       activeSearch: submittedSearch,
       activeQueryTerm: submittedSearch.query,
@@ -752,10 +892,7 @@ export default function ProspectingPage() {
       searchError: '',
     });
     if (searchStartSnapshot) {
-      shouldPromoteHistoryRef.current =
-        getSearchHistoryKey(submittedSearch) !== getSearchHistoryKey(activeSearchRef.current);
-      commitSessionSnapshot(searchStartSnapshot, { promoteToTop: shouldPromoteHistoryRef.current });
-      shouldPromoteHistoryRef.current = false;
+      commitSessionSnapshot(searchStartSnapshot);
     }
     try {
       const url = buildSearchUrl(1, submittedSearch, submittedSearch.query);
@@ -764,6 +901,7 @@ export default function ProspectingPage() {
       
       if (res.ok) {
         const firstBatch = markRowsForAutoEnrichment(normalizeIncomingRows(data.data || []));
+        const resultSourceLabel = formatProspectResultSourceLabel(data.resultSource);
         const completedSnapshot = buildSessionSnapshot({
           activeSearch: submittedSearch,
           activeQueryTerm: submittedSearch.query,
@@ -771,13 +909,14 @@ export default function ProspectingPage() {
           searchId: data.searchId || null,
           currentPage: 1,
           hasMoreResults: Boolean(data.hasMore),
-          lastScrapeSummary: `Scraping complete: ${data.count ?? data.data?.length ?? 0} businesses processed. Email lookup is running automatically.`,
+          lastScrapeSummary: `${resultSourceLabel}: ${data.count ?? data.data?.length ?? 0} businesses processed. Email lookup is running automatically.`,
           results: firstBatch,
           isSearching: false,
           searchError: '',
         });
         if (completedSnapshot) {
           commitSessionSnapshot(completedSnapshot, { resumeQueue: true });
+          void fetchSearchHistory();
         }
       } else {
         const failedSnapshot = buildSessionSnapshot({
@@ -849,6 +988,7 @@ export default function ProspectingPage() {
         const unseenRows = nextRows.filter((row) =>
           !resultsRef.current.some((existingRow) => getProspectIdentity(existingRow) === getProspectIdentity(row))
         );
+        const resultSourceLabel = formatProspectResultSourceLabel(data.resultSource);
 
         appendedRows = unseenRows;
         lastHasMore = Boolean(data.hasMore);
@@ -864,12 +1004,13 @@ export default function ProspectingPage() {
             activeQueryTerm: workingQueryTerm,
             queryVariantIndex: workingQueryIndex,
             lastScrapeSummary: switchedQuery
-              ? `Loaded ${unseenRows.length} more businesses from a related Google Maps search for "${workingQueryTerm}". Email lookup is running automatically.`
-              : `Loaded ${unseenRows.length} more businesses. Email lookup is running automatically.`,
+              ? `${resultSourceLabel}: loaded ${unseenRows.length} more businesses from a related Google Maps search for "${workingQueryTerm}". Email lookup is running automatically.`
+              : `${resultSourceLabel}: loaded ${unseenRows.length} more businesses. Email lookup is running automatically.`,
             searchError: '',
           });
           if (loadMoreSnapshot) {
             commitSessionSnapshot(loadMoreSnapshot);
+            void fetchSearchHistory();
           }
           queueAutoEnrichment(unseenRows);
           return;
@@ -906,6 +1047,7 @@ export default function ProspectingPage() {
       });
       if (exhaustedSnapshot) {
         commitSessionSnapshot(exhaustedSnapshot);
+        void fetchSearchHistory();
       }
     } catch {
       setSearchError('Network error while loading more results.');
@@ -958,8 +1100,45 @@ export default function ProspectingPage() {
     return [...startsWithMatches, ...containsMatches].slice(0, 10);
   }, [country]);
 
-  const handleRestoreHistory = (entry: ProspectHistoryEntry) => {
-    restoreSnapshot(entry.snapshot, { resumeQueue: true });
+  const handleRestoreHistory = async (entry: ProspectHistoryEntry) => {
+    try {
+      setSearchError('');
+      const response = await fetch(`/api/prospect/history/${encodeURIComponent(entry.searchId)}`, {
+        cache: 'no-store',
+      });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        setSearchError(parseApiError(data, 'Failed to restore saved search'));
+        return;
+      }
+
+      const restoredSearch: ProspectSearchContext = {
+        query: data?.data?.search?.query || entry.category,
+        location: data?.data?.search?.location || entry.locationLabel,
+        city: '',
+        country: '',
+      };
+      const restoredRows = reviveStoredRows(data?.data?.leads || []);
+      const restoredSnapshot = buildSessionSnapshot({
+        activeSearch: restoredSearch,
+        activeQueryTerm: restoredSearch.query,
+        queryVariantIndex: 0,
+        searchId: data?.data?.searchId || entry.searchId,
+        currentPage: 1,
+        hasMoreResults: false,
+        lastScrapeSummary: `Restored ${restoredRows.length} saved leads from Supabase.`,
+        results: restoredRows,
+        isSearching: false,
+        searchError: '',
+      });
+
+      if (restoredSnapshot) {
+        commitSessionSnapshot(restoredSnapshot);
+      }
+    } catch {
+      setSearchError('Failed to restore saved search from Supabase.');
+    }
   };
 
   const handleCategorySuggestionSelect = (suggestion: string) => {
@@ -970,42 +1149,6 @@ export default function ProspectingPage() {
   const handleCountrySuggestionSelect = (suggestion: string) => {
     setCountry(suggestion);
     setShowCountrySuggestions(false);
-  };
-
-  const saveProspectToCRM = async (prospect: ProspectResult) => {
-    const fallbackDomain = `${prospect.name.toLowerCase().replace(/[^a-z0-9]+/g, '') || 'lead'}.com`;
-    const companyRes = await fetch('/api/companies', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: prospect.name,
-        domain: prospect.website ? new URL(prospect.website).hostname : fallbackDomain,
-        website_url: prospect.website,
-      }),
-    });
-    const companyData = await companyRes.json();
-
-    if (!companyRes.ok) {
-      throw new Error(companyData?.error || 'Failed to save company');
-    }
-
-    const email = prospect.emails[0] || `unknown@${companyData.data.domain}`;
-    const contactRes = await fetch('/api/contacts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        first_name: prospect.name.split(' ')[0],
-        last_name: prospect.name.split(' ').slice(1).join(' ') || 'Lead',
-        email,
-        company_id: companyData.data.id,
-        title: 'Prospect',
-      }),
-    });
-    const contactData = await contactRes.json().catch(() => null);
-
-    if (!contactRes.ok) {
-      throw new Error(contactData?.error || 'Failed to save contact');
-    }
   };
 
   const markProspectsSaved = (savedRowKeys: string[]) => {
@@ -1027,10 +1170,18 @@ export default function ProspectingPage() {
 
   const handleSaveToCRM = async (prospect: ProspectResult) => {
     try {
-      await saveProspectToCRM(prospect);
+      const payload = await convertProspectToCRM(prospect);
+      const savedContactCount =
+        typeof payload?.data?.contactCount === 'number'
+          ? payload.data.contactCount
+          : prospect.emails.length;
       markProspectsSaved([getRowKey(prospect)]);
       setSearchError('');
-      setLastScrapeSummary(`Saved ${prospect.name} to CRM.`);
+      setLastScrapeSummary(
+        savedContactCount > 1
+          ? `Saved ${prospect.name} to CRM with ${savedContactCount} email contacts.`
+          : `Saved ${prospect.name} to CRM.`
+      );
     } catch (err: any) {
       setSearchError(err?.message || 'Failed to save lead to CRM');
     }
@@ -1058,11 +1209,16 @@ export default function ProspectingPage() {
 
     const savedRowKeys: string[] = [];
     let failedCount = 0;
+    let savedContactCount = 0;
 
     for (const prospect of prospectsToSave) {
       try {
-        await saveProspectToCRM(prospect);
+        const payload = await convertProspectToCRM(prospect);
         savedRowKeys.push(getRowKey(prospect));
+        savedContactCount +=
+          typeof payload?.data?.contactCount === 'number'
+            ? payload.data.contactCount
+            : prospect.emails.length;
       } catch {
         failedCount++;
       }
@@ -1071,8 +1227,8 @@ export default function ProspectingPage() {
     markProspectsSaved(savedRowKeys);
     setLastScrapeSummary(
       failedCount > 0
-        ? `Saved ${savedRowKeys.length} selected leads to CRM. ${failedCount} could not be saved.`
-        : `Saved ${savedRowKeys.length} selected leads to CRM.`
+        ? `Saved ${savedRowKeys.length} selected leads to CRM with ${savedContactCount} email contacts. ${failedCount} could not be saved.`
+        : `Saved ${savedRowKeys.length} selected leads to CRM with ${savedContactCount} email contacts.`
     );
     if (failedCount > 0) {
       setSearchError(`${failedCount} selected lead${failedCount === 1 ? '' : 's'} could not be saved.`);
@@ -1126,7 +1282,10 @@ export default function ProspectingPage() {
           {row.status === 'enriching' ? (
             <LookingIndicator />
           ) : row.emails.length > 0 ? (
-            <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+            <div
+              style={{ display: 'flex', gap: '4px', alignItems: 'center' }}
+              title={row.emails.join(', ')}
+            >
               <Mail size={14} style={{ color: 'var(--primary-color)' }} />
               <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>{row.emails[0]}</span>
               {row.emails.length > 1 && <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>+{row.emails.length - 1}</span>}
@@ -1272,7 +1431,12 @@ export default function ProspectingPage() {
             </div>
           )}
 
-          <button type="submit" className="btn-primary" disabled={isSearching} style={{ height: '42px', minWidth: '150px' }}>
+          <button
+            type="submit"
+            className="btn-primary"
+            disabled={isSearching || !hasResolvedRole}
+            style={{ height: '42px', minWidth: '150px' }}
+          >
             {isSearching ? (
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
                 <span>Looking</span>
@@ -1288,11 +1452,20 @@ export default function ProspectingPage() {
                   ))}
                 </span>
               </div>
+            ) : !hasResolvedRole ? (
+              'Loading...'
             ) : 'Discover Leads'}
           </button>
         </form>
         {searchError && (
           <p style={{ color: 'var(--error)', marginTop: '0.75rem', fontSize: '0.8rem' }}>{searchError}</p>
+        )}
+        {hasResolvedRole && (
+          <p className="scrape-last-summary" style={{ marginTop: '0.5rem' }}>
+            {isAdminUser
+              ? 'Admin mode: up to 100 leads per search.'
+              : 'User mode: up to 20 leads per search.'}
+          </p>
         )}
         {isSearching && (
           <div className="prospect-inline-status">
@@ -1312,7 +1485,7 @@ export default function ProspectingPage() {
                 Search History
               </span>
               <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                Saved in this browser until you search a new business category.
+                Saved automatically to Supabase for this workspace.
               </span>
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem' }}>
@@ -1358,7 +1531,7 @@ export default function ProspectingPage() {
         data={visibleResults} 
         columns={columns} 
         isLoading={false}
-        maxVisibleRows={10}
+        maxVisibleRows={20}
         getRowId={(row) => row.source_id || `${row.name}-${row.website || ''}-${row.address || ''}`}
         selectedRows={selectedRows}
         onSelectionChange={setSelectedRows}

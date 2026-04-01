@@ -19,6 +19,7 @@ const mainNav: NavItem[] = [
 const manageNav: NavItem[] = [
   { label: 'Contacts', icon: 'C', href: '/contacts' },
   { label: 'Companies', icon: 'O', href: '/companies' },
+  { label: 'Leads', icon: 'L', href: '/leads' },
   { label: 'Deals', icon: 'D', href: '/deals' },
   { label: 'Tasks', icon: 'T', href: '/tasks' },
 ];
@@ -41,7 +42,7 @@ export default function Sidebar({ user }: SidebarProps) {
 
   const isActive = (href: string) => {
     if (href === '/') return pathname === '/';
-    return pathname.startsWith(href);
+    return Boolean(pathname?.startsWith(href));
   };
 
   const initials = user

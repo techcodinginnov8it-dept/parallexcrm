@@ -8,11 +8,28 @@ const prismaClientSingleton = () => {
   return new PrismaClient({ adapter });
 };
 
+function hasExpectedDelegates(client: PrismaClient | undefined): client is PrismaClient {
+  if (!client) return false;
+
+  return Boolean(
+    (client as PrismaClient & { lead?: unknown }).lead &&
+    (client as PrismaClient & { searchQuery?: unknown }).searchQuery
+  );
+}
+
 declare global {
   var prisma: undefined | ReturnType<typeof prismaClientSingleton>;
 }
 
-const prisma = globalThis.prisma ?? prismaClientSingleton();
+export function getPrismaClient(): PrismaClient {
+  if (!hasExpectedDelegates(globalThis.prisma)) {
+    globalThis.prisma = prismaClientSingleton();
+  }
+
+  return globalThis.prisma;
+}
+
+const prisma: PrismaClient = getPrismaClient();
 
 export default prisma;
 

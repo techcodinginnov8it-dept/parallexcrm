@@ -25,7 +25,7 @@ const EMAIL_VALIDATION_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}$/i;
 const MAX_EMAILS_PER_BUSINESS = 5;
 const ENRICHMENT_CONCURRENCY = 15;
 const TIMEOUT = 5000;
-const MAX_LIMIT = 60;
+const MAX_LIMIT = 140;
 const IGNORED_EMAIL_PREFIXES = ['noreply@', 'no-reply@', 'example@', 'test@'];
 const GOOGLE_OWNED_DOMAINS = [
   'google.com',
@@ -41,8 +41,15 @@ const MAPS_WEBSITE_SELECTORS = [
   'a[data-tooltip*="Website"]',
   'a[data-tooltip*="website"]',
 ];
+const MAPS_SEARCH_INPUT_SELECTOR =
+  'input#searchboxinput, input[aria-label*="Search Google Maps"], input[aria-label*="Search"]';
+const MAPS_SEARCH_BUTTON_SELECTOR =
+  'button#searchbox-searchbutton, button[aria-label*="Search"]';
+const MAPS_FEED_SELECTOR = 'div[role="feed"], div.m6QErb[role="feed"]';
+const MAPS_RESULT_LINK_SELECTOR =
+  'a.hfpxzc, a[href*="/maps/place/"][aria-label], a[href*="/maps/place/"]';
 const MAPS_CARD_SELECTOR =
-  'div[role="feed"] > div:has(a.hfpxzc), div.Nv2PK:has(a.hfpxzc), div[role="article"]:has(a.hfpxzc)';
+  'div[role="feed"] > div:has(a.hfpxzc), div[role="feed"] > div:has(a[href*="/maps/place/"]), div.Nv2PK:has(a.hfpxzc), div.Nv2PK:has(a[href*="/maps/place/"]), div[role="article"]:has(a.hfpxzc), div[role="article"]:has(a[href*="/maps/place/"])';
 
 const MAPS_NAVIGATION_ATTEMPTS = [
   { waitUntil: 'commit' as const, timeout: 12000 },
@@ -53,6 +60,9 @@ const MAPS_DETAIL_NAVIGATION_ATTEMPTS = [
   { waitUntil: 'domcontentloaded' as const, timeout: 5000 },
 ];
 const MAX_DETAIL_LOOKUPS = 2;
+const LARGE_BATCH_THRESHOLD = 80;
+const DEFAULT_SCROLL_RETRIES = 4;
+const EXTENDED_SCROLL_RETRIES = 8;
 const GENERIC_SINGLE_RESULT_NAMES = new Set([
   'results',
   'search results',
@@ -270,6 +280,34 @@ async function extractWebsiteFromMapsCard(card: Locator): Promise<string | null>
   return null;
 }
 
+async function resubmitGoogleMapsSearch(page: Page, query: string): Promise<boolean> {
+  const searchInput = page.locator(MAPS_SEARCH_INPUT_SELECTOR).first();
+  const searchInputCount = await searchInput.count().catch(() => 0);
+  if (searchInputCount === 0) return false;
+
+  try {
+    await searchInput.click({ timeout: 1500 }).catch(() => undefined);
+    await searchInput.fill(query, { timeout: 2000 });
+    await page.keyboard.press('Enter').catch(() => undefined);
+    await page.waitForTimeout(1200);
+
+    const resultLinks = await page.locator(MAPS_RESULT_LINK_SELECTOR).count().catch(() => 0);
+    if (resultLinks > 0) return true;
+
+    const searchButton = page.locator(MAPS_SEARCH_BUTTON_SELECTOR).first();
+    const searchButtonCount = await searchButton.count().catch(() => 0);
+    if (searchButtonCount > 0) {
+      await searchButton.click({ timeout: 1500 }).catch(() => undefined);
+      await page.waitForTimeout(1200);
+      return true;
+    }
+  } catch {
+    return false;
+  }
+
+  return true;
+}
+
 function parseMapsCardText(fullText: string): { address: string | null; category: string | null } {
   const lines = fullText.split('\n').filter((line) => line.trim().length > 0);
   const detailSeparatorRegex = /[\u00B7\u2022]|\u00C2\u00B7/;
@@ -325,7 +363,7 @@ async function extractFastFirstCardData(page: Page): Promise<FastFirstCardData[]
 
       return elements.map((element) => {
         const card = element as HTMLElement;
-        const businessLink = card.querySelector('a.hfpxzc');
+        const businessLink = card.querySelector(payload.resultLinkSelector);
         const name =
           businessLink?.getAttribute('aria-label')?.trim() ||
           businessLink?.textContent?.trim() ||
@@ -351,6 +389,7 @@ async function extractFastFirstCardData(page: Page): Promise<FastFirstCardData[]
     {
       websiteSelectors: MAPS_WEBSITE_SELECTORS,
       googleOwnedDomains: GOOGLE_OWNED_DOMAINS,
+      resultLinkSelector: MAPS_RESULT_LINK_SELECTOR,
     }
   );
 
@@ -641,6 +680,10 @@ export async function scrapeGoogleMaps(
     const safeLimit = Math.min(Math.max(maxResults, 1), MAX_LIMIT);
     const startAt = Math.max(offset, 0);
     const targetCount = startAt + safeLimit;
+    const maxScrollRetries =
+      targetCount > LARGE_BATCH_THRESHOLD ? EXTENDED_SCROLL_RETRIES : DEFAULT_SCROLL_RETRIES;
+    const scrollDistance = targetCount > LARGE_BATCH_THRESHOLD ? 2800 : 2000;
+    const scrollWaitMs = targetCount > LARGE_BATCH_THRESHOLD ? 1100 : 900;
 
     browser = await chromium.launch({
       headless: true,
@@ -696,23 +739,34 @@ export async function scrapeGoogleMaps(
 
     let hasListResults = false;
     for (let attempt = 0; attempt < 20; attempt++) {
-      const [feedCount, cardCount] = await Promise.all([
-        page.locator('div[role="feed"]').count(),
-        page.locator('a.hfpxzc').count(),
+      const [feedCount, resultLinkCount, cardCount] = await Promise.all([
+        page.locator(MAPS_FEED_SELECTOR).count(),
+        page.locator(MAPS_RESULT_LINK_SELECTOR).count(),
+        page.locator(MAPS_CARD_SELECTOR).count(),
       ]);
 
       if (attempt === 0 || attempt === 4 || attempt === 9 || attempt === 14 || attempt === 19) {
         console.log(
-          `Polling Google Maps results ${attempt + 1}/20 (feed=${feedCount}, cards=${cardCount})`
+          `Polling Google Maps results ${attempt + 1}/20 (feed=${feedCount}, links=${resultLinkCount}, cards=${cardCount})`
         );
       }
 
-      if (feedCount > 0 || cardCount > 0) {
+      if (feedCount > 0 || resultLinkCount > 0 || cardCount > 0) {
         hasListResults = true;
-        console.log(`Detected Google Maps results list (feed=${feedCount}, cards=${cardCount})`);
+        console.log(
+          `Detected Google Maps results list (feed=${feedCount}, links=${resultLinkCount}, cards=${cardCount})`
+        );
         break;
       }
 
+      if (attempt === 7) {
+        console.log('Google Maps results still empty, resubmitting search from search box...');
+        await resubmitGoogleMapsSearch(page, query).catch(() => undefined);
+      }
+
+      if (attempt === 4 || attempt === 9 || attempt === 14) {
+        await page.mouse.wheel(0, 1800).catch(() => undefined);
+      }
       await page.waitForTimeout(500);
     }
 
@@ -749,7 +803,7 @@ export async function scrapeGoogleMaps(
     let prevCount = 0;
     let retries = 0;
 
-    while (prevCount < targetCount && retries < 4) {
+    while (prevCount < targetCount && retries < maxScrollRetries) {
       const currentCards = await cards.count();
       if (currentCards >= targetCount || currentCards === prevCount) {
         retries++;
@@ -758,16 +812,16 @@ export async function scrapeGoogleMaps(
       }
       prevCount = currentCards;
 
-      const feedHandle = await page.locator('div[role="feed"]').first().elementHandle().catch(() => null);
+      const feedHandle = await page.locator(MAPS_FEED_SELECTOR).first().elementHandle().catch(() => null);
       if (feedHandle) {
-        await page.evaluate((el) => {
-          if (el) el.scrollBy(0, 2000);
-        }, feedHandle);
+        await feedHandle.evaluate((el, scrollDelta) => {
+          if (el) el.scrollBy(0, scrollDelta);
+        }, scrollDistance);
       } else {
-        await page.mouse.wheel(0, 2400).catch(() => undefined);
+        await page.mouse.wheel(0, scrollDistance + 400).catch(() => undefined);
       }
 
-      await page.waitForTimeout(900);
+      await page.waitForTimeout(scrollWaitMs);
     }
 
     const count = await cards.count();
@@ -782,17 +836,17 @@ export async function scrapeGoogleMaps(
       let lastUniqueCount = extractedCards.length;
       let uniqueRetries = 0;
 
-      while (extractedCards.length < startAt + safeLimit && uniqueRetries < 4) {
-        const feedHandle = await page.locator('div[role="feed"]').first().elementHandle().catch(() => null);
+      while (extractedCards.length < startAt + safeLimit && uniqueRetries < maxScrollRetries) {
+        const feedHandle = await page.locator(MAPS_FEED_SELECTOR).first().elementHandle().catch(() => null);
         if (feedHandle) {
-          await page.evaluate((el) => {
-            if (el) el.scrollBy(0, 2000);
-          }, feedHandle);
+          await feedHandle.evaluate((el, scrollDelta) => {
+            if (el) el.scrollBy(0, scrollDelta);
+          }, scrollDistance);
         } else {
-          await page.mouse.wheel(0, 2400).catch(() => undefined);
+          await page.mouse.wheel(0, scrollDistance + 400).catch(() => undefined);
         }
 
-        await page.waitForTimeout(900);
+        await page.waitForTimeout(scrollWaitMs);
         extractedCards = await extractFastFirstCardData(page);
         if (extractedCards.length <= lastUniqueCount) {
           uniqueRetries++;
@@ -828,10 +882,14 @@ export async function scrapeGoogleMaps(
     for (let i = startAt; i < endAt; i++) {
       const card = cards.nth(i);
 
-      let name = await card.locator('a.hfpxzc').getAttribute('aria-label').catch(() => '');
+      const resultLink = card.locator(MAPS_RESULT_LINK_SELECTOR).first();
+      let name = await resultLink.getAttribute('aria-label').catch(() => '');
+      if (!name) {
+        name = await resultLink.innerText().catch(() => '');
+      }
       if (!name) continue;
 
-      const placeHref = await card.locator('a.hfpxzc').first().getAttribute('href').catch(() => null);
+      const placeHref = await resultLink.getAttribute('href').catch(() => null);
       const mapsPlaceUrl = normalizeMapsUrl(placeHref);
       let website = await extractWebsiteFromMapsCard(card);
 

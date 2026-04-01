@@ -3,6 +3,8 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { getCurrentUser, unauthorizedResponse } from '@/lib/api-utils';
 import { lookupGoogleMapsContactData } from '@/lib/scrapers/google-maps-scraper';
+import { getPrismaClient } from '@/lib/db';
+import { mergeUniqueEmails, normalizeOptionalString, normalizeWebsiteForStorage } from '@/lib/lead-utils';
 
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/gi;
 const EMAIL_VALIDATION_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}$/i;
@@ -213,12 +215,31 @@ async function scrapeEmailsFromWebsite(websiteUrl: string): Promise<string[]> {
 
 export async function POST(request: NextRequest) {
   try {
+    const prisma = getPrismaClient();
     const user = await getCurrentUser();
     if (!user) return unauthorizedResponse();
 
-    const { url, name, address } = await request.json();
+    const rawBody = await request.text();
+    if (!rawBody.trim()) {
+      return NextResponse.json(
+        { error: 'Missing enrichment payload' },
+        { status: 400 }
+      );
+    }
+
+    let payload: any;
+    try {
+      payload = JSON.parse(rawBody);
+    } catch {
+      return NextResponse.json(
+        { error: 'Invalid enrichment payload' },
+        { status: 400 }
+      );
+    }
+
+    const { url, name, address, leadId } = payload;
     let normalizedUrl = normalizeWebsiteUrl(url);
-    let resolvedAddress = typeof address === 'string' ? address : null;
+    let resolvedAddress = normalizeOptionalString(address, 4000);
     let resultEmails: string[] = [];
 
     if (!normalizedUrl) {
@@ -233,7 +254,7 @@ export async function POST(request: NextRequest) {
       const googleMapsData = await lookupGoogleMapsContactData(name, resolvedAddress);
       if (googleMapsData) {
         normalizedUrl = normalizeWebsiteUrl(googleMapsData.website ?? null);
-        resolvedAddress = googleMapsData.address || resolvedAddress;
+        resolvedAddress = normalizeOptionalString(googleMapsData.address, 4000) || resolvedAddress;
         resultEmails = Array.isArray(googleMapsData.emails) ? googleMapsData.emails : [];
       }
     }
@@ -241,6 +262,53 @@ export async function POST(request: NextRequest) {
     if (normalizedUrl && resultEmails.length === 0) {
       console.log(`Enriching business lead via HTTP fetch: ${name} (${normalizedUrl})`);
       resultEmails = await scrapeEmailsFromWebsite(normalizedUrl);
+    }
+
+    if (typeof leadId === 'string' && leadId.trim()) {
+      const existingLead = await prisma.lead.findFirst({
+        where: {
+          id: leadId,
+          org_id: user.org_id,
+        },
+        select: {
+          id: true,
+          emails: true,
+          status: true,
+        },
+      });
+
+      if (existingLead) {
+        const mergedEmails = mergeUniqueEmails(existingLead.emails, resultEmails);
+        const shouldDeleteNoEmailLead =
+          mergedEmails.length === 0 &&
+          existingLead.status !== 'saved' &&
+          existingLead.status !== 'stored';
+
+        if (shouldDeleteNoEmailLead) {
+          await prisma.lead.delete({
+            where: { id: existingLead.id },
+          });
+        } else {
+          const nextStatus =
+            existingLead.status === 'saved'
+              ? 'saved'
+              : existingLead.status === 'stored'
+                ? 'stored'
+                : mergedEmails.length > 0
+                  ? 'enriched'
+                  : 'unavailable';
+
+          await prisma.lead.update({
+            where: { id: existingLead.id },
+            data: {
+              website: normalizeWebsiteForStorage(normalizedUrl, 255) || undefined,
+              address: resolvedAddress || undefined,
+              emails: { set: mergedEmails },
+              status: nextStatus,
+            },
+          });
+        }
+      }
     }
 
     console.log(`Enrichment complete for ${name}. Found ${resultEmails.length} emails.`);
@@ -253,7 +321,19 @@ export async function POST(request: NextRequest) {
     });
 
   } catch (error: any) {
-    console.error('Enrichment failed:', error.message);
+    const errorMessage = String(error?.message || error || 'Unknown enrichment error');
+    if (
+      errorMessage.includes('Unexpected end of JSON input') ||
+      errorMessage.includes('aborted')
+    ) {
+      console.warn('Enrichment request was interrupted before completion.');
+      return NextResponse.json(
+        { error: 'Enrichment request interrupted' },
+        { status: 400 }
+      );
+    }
+
+    console.error('Enrichment failed:', errorMessage);
     return NextResponse.json({ error: 'Failed to extract emails from website' }, { status: 500 });
   }
 }

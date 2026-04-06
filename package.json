@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "postinstall": "prisma generate",
+    "postinstall": "node scripts/postinstall.cjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",

@@ -1,4 +1,4 @@
-import { chromium, Browser, BrowserContext, Page, Locator } from 'playwright-chromium';
+import type { Browser, BrowserContext, Page, Locator } from 'playwright-chromium';
 import pLimit from 'p-limit';
 import axios from 'axios';
 import { normalizeWebsiteForStorage } from '@/lib/lead-utils';
@@ -72,6 +72,19 @@ const GENERIC_SINGLE_RESULT_NAMES = new Set([
 ]);
 
 const limit = pLimit(ENRICHMENT_CONCURRENCY);
+let playwrightChromiumPromise: Promise<typeof import('playwright-chromium')> | null = null;
+
+async function getPlaywrightChromium() {
+  if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
+  }
+
+  if (!playwrightChromiumPromise) {
+    playwrightChromiumPromise = import('playwright-chromium');
+  }
+
+  return playwrightChromiumPromise;
+}
 
 function normalizeHost(hostname: string): string {
   return hostname.replace(/^www\./i, '').toLowerCase();
@@ -662,6 +675,7 @@ export async function scrapeGoogleMaps(
   let browser: Browser | null = null;
   let detailPage: Page | null = null;
   try {
+    const { chromium } = await getPlaywrightChromium();
     const safeLimit = Math.min(Math.max(maxResults, 1), MAX_LIMIT);
     const startAt = Math.max(offset, 0);
     const targetCount = startAt + safeLimit;

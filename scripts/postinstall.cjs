@@ -1,8 +1,17 @@
 const { execFileSync } = require('child_process');
+const path = require('path');
 
 function runNodeScript(label, scriptPath, args = [], env = process.env) {
   console.log(`[postinstall] ${label}`);
   execFileSync(process.execPath, [require.resolve(scriptPath), ...args], {
+    stdio: 'inherit',
+    env,
+  });
+}
+
+function runNodeFile(label, filePath, args = [], env = process.env) {
+  console.log(`[postinstall] ${label}`);
+  execFileSync(process.execPath, [filePath, ...args], {
     stdio: 'inherit',
     env,
   });
@@ -28,10 +37,12 @@ function main() {
     ...process.env,
     PLAYWRIGHT_BROWSERS_PATH: '0',
   };
+  const playwrightPackageRoot = path.dirname(require.resolve('playwright-chromium/package.json'));
+  const playwrightCliPath = path.join(playwrightPackageRoot, 'cli.js');
 
-  runNodeScript(
+  runNodeFile(
     'Installing Playwright Chromium headless shell',
-    'playwright-chromium/cli.js',
+    playwrightCliPath,
     ['install', '--only-shell', 'chromium'],
     playwrightEnv
   );

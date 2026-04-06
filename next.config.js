@@ -4,6 +4,14 @@ const path = require('path');
 const nextConfig = {
   serverExternalPackages: ['playwright-chromium'],
   outputFileTracingRoot: path.resolve(__dirname),
+  outputFileTracingIncludes: {
+    '/api/prospect/search': [
+      './node_modules/playwright-core/.local-browsers/**/*',
+    ],
+    '/api/prospect/enrich': [
+      './node_modules/playwright-core/.local-browsers/**/*',
+    ],
+  },
   images: {
     remotePatterns: [
       { protocol: 'https', hostname: '*.supabase.co' },

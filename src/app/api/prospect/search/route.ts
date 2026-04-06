@@ -40,6 +40,12 @@ type ScrapeCollectionResult = {
   rows: ScrapedLeadRow[];
   usedRelatedVariants: boolean;
 };
+type RankedScrapedLeadRow = {
+  row: ScrapedLeadRow;
+  score: number;
+  strongMatch: boolean;
+  sourceOrder: number;
+};
 
 const ADMIN_VARIANT_SUFFIXES = [
   'company',
@@ -51,9 +57,58 @@ const ADMIN_VARIANT_SUFFIXES = [
   'consultant',
   'provider',
 ];
-const ADMIN_VARIANT_LIMIT = 6;
-const ADMIN_EXTRA_RESULT_BUFFER = 40;
-const SCRAPER_BATCH_LIMIT = 140;
+const ADMIN_VARIANT_LIMIT = 3;
+const ADMIN_EXTRA_RESULT_BUFFER = 12;
+const ADMIN_DEEP_FILL_TIME_BUDGET_MS = 65000;
+const ADMIN_DEEP_FILL_MIN_REMAINING_MS = 30000;
+const SCRAPER_BATCH_LIMIT = 110;
+const SEARCH_STOP_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'at',
+  'for',
+  'from',
+  'in',
+  'near',
+  'of',
+  'on',
+  'the',
+  'to',
+  'with',
+]);
+const GENERIC_BUSINESS_TERMS = new Set([
+  'agency',
+  'business',
+  'businesses',
+  'companies',
+  'company',
+  'consultant',
+  'consultants',
+  'consulting',
+  'firm',
+  'group',
+  'provider',
+  'providers',
+  'service',
+  'services',
+  'solution',
+  'solutions',
+]);
+const TAG_KEYWORD_MAP: Record<string, string[]> = {
+  'Business Services': ['business', 'consulting', 'consultant', 'outsourcing', 'bpo'],
+  Construction: ['builder', 'construction', 'contractor', 'electrical', 'hvac', 'plumbing', 'roofing'],
+  Education: ['academy', 'course', 'education', 'school', 'training', 'tutoring'],
+  Finance: ['accounting', 'bookkeeping', 'finance', 'financial', 'insurance', 'mortgage', 'tax'],
+  Healthcare: ['clinic', 'dental', 'healthcare', 'hospital', 'medical', 'therapy'],
+  Hospitality: ['cafe', 'catering', 'hotel', 'restaurant', 'travel'],
+  IT: ['cloud', 'cyber', 'developer', 'development', 'digital', 'it', 'managed', 'software', 'tech', 'technology'],
+  Legal: ['attorney', 'law', 'lawyer', 'legal'],
+  Logistics: ['courier', 'freight', 'logistics', 'shipping', 'trucking', 'warehouse'],
+  Marketing: ['advertising', 'branding', 'marketing', 'media', 'ppc', 'seo'],
+  'Real Estate': ['brokerage', 'estate', 'property', 'real', 'realty', 'realtor'],
+  Recruitment: ['headhunter', 'hr', 'recruitment', 'staffing', 'talent'],
+};
 
 function getLeadDelegate(prismaClient: ReturnType<typeof getPrismaClient>) {
   return (prismaClient as typeof prismaClient & { lead?: typeof prismaClient.lead }).lead;
@@ -132,6 +187,170 @@ function dedupeScrapedRows(rows: ScrapedLeadRow[]): ScrapedLeadRow[] {
   });
 }
 
+function normalizeSearchText(value: string | null | undefined): string {
+  return (value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeSearchTerms(value: string | null | undefined): string[] {
+  const normalized = normalizeSearchText(value);
+  if (!normalized) return [];
+
+  return normalized
+    .split(' ')
+    .filter(Boolean)
+    .filter((term) => !SEARCH_STOP_WORDS.has(term));
+}
+
+function buildTokenSet(value: string | null | undefined): Set<string> {
+  return new Set(tokenizeSearchTerms(value));
+}
+
+function scoreScrapedLeadRow(
+  row: ScrapedLeadRow,
+  query: string,
+  displayLocation: string
+): Omit<RankedScrapedLeadRow, 'row' | 'sourceOrder'> {
+  const normalizedQuery = normalizeSearchText(query);
+  const normalizedName = normalizeSearchText(row.name);
+  const normalizedCategory = normalizeSearchText(row.category);
+  const normalizedAddress = normalizeSearchText(row.address);
+  const normalizedWebsite = normalizeSearchText(row.website);
+  const queryTerms = tokenizeSearchTerms(query);
+  const specificTerms = queryTerms.filter((term) => !GENERIC_BUSINESS_TERMS.has(term));
+  const genericTerms = queryTerms.filter((term) => GENERIC_BUSINESS_TERMS.has(term));
+  const locationTerms = tokenizeSearchTerms(displayLocation);
+  const nameTokens = buildTokenSet(row.name);
+  const categoryTokens = buildTokenSet(row.category);
+  const addressTokens = buildTokenSet(row.address);
+  const websiteTokens = buildTokenSet(
+    row.website
+      ? row.website.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/[./_-]+/g, ' ')
+      : ''
+  );
+  const { generalBusinessTag } = inferLeadTags({
+    searchQuery: query,
+    category: row.category,
+  });
+  const tagKeywords = TAG_KEYWORD_MAP[generalBusinessTag] || [];
+  const tagKeywordMatches = tagKeywords.filter(
+    (keyword) => nameTokens.has(keyword) || categoryTokens.has(keyword)
+  ).length;
+  const queryPhraseMatch =
+    (normalizedQuery && normalizedName.includes(normalizedQuery)) ||
+    (normalizedQuery && normalizedCategory.includes(normalizedQuery));
+
+  let score = 0;
+  let specificMatchCount = 0;
+
+  if (queryPhraseMatch) {
+    score += 18;
+  }
+
+  for (const term of specificTerms) {
+    if (nameTokens.has(term)) {
+      score += 7;
+      specificMatchCount++;
+      continue;
+    }
+
+    if (categoryTokens.has(term)) {
+      score += 6;
+      specificMatchCount++;
+      continue;
+    }
+
+    if (websiteTokens.has(term)) {
+      score += 3;
+      specificMatchCount++;
+    }
+  }
+
+  for (const term of genericTerms) {
+    if (categoryTokens.has(term)) {
+      score += 2;
+      continue;
+    }
+
+    if (nameTokens.has(term)) {
+      score += 1;
+    }
+  }
+
+  for (const term of locationTerms) {
+    if (addressTokens.has(term)) {
+      score += 2;
+      continue;
+    }
+
+    if (nameTokens.has(term)) {
+      score += 1;
+    }
+  }
+
+  if (tagKeywordMatches > 0) {
+    score += Math.min(tagKeywordMatches, 3) * 3;
+  }
+
+  if (row.category) score += 1;
+  if (row.address) score += 1;
+  if (row.website) score += 1;
+
+  if (!queryPhraseMatch && specificMatchCount === 0 && tagKeywordMatches === 0) {
+    score -= 6;
+  }
+
+  if (
+    normalizedCategory &&
+    !normalizedCategory.includes(normalizedQuery) &&
+    specificTerms.length > 0 &&
+    specificTerms.every((term) => !categoryTokens.has(term) && !nameTokens.has(term))
+  ) {
+    score -= 2;
+  }
+
+  return {
+    score,
+    strongMatch: queryPhraseMatch || specificMatchCount > 0 || tagKeywordMatches > 0,
+  };
+}
+
+function rankScrapedLeadRows(
+  rows: ScrapedLeadRow[],
+  query: string,
+  displayLocation: string,
+  targetCount: number
+): ScrapedLeadRow[] {
+  const rankedRows = rows
+    .map((row, sourceOrder) => ({
+      row,
+      sourceOrder,
+      ...scoreScrapedLeadRow(row, query, displayLocation),
+    }))
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      if (right.strongMatch !== left.strongMatch) return Number(right.strongMatch) - Number(left.strongMatch);
+      return left.sourceOrder - right.sourceOrder;
+    });
+
+  const strongMatches = rankedRows.filter((row) => row.strongMatch);
+  const minimumStrongMatchTarget = Math.min(targetCount, 12);
+  const chosenRows =
+    strongMatches.length >= minimumStrongMatchTarget ? strongMatches : rankedRows;
+
+  console.log(
+    `Google Maps relevance ranking kept ${Math.min(
+      chosenRows.length,
+      targetCount
+    )} prioritized rows (${strongMatches.length} strong matches out of ${rows.length} candidates).`
+  );
+
+  return chosenRows.map((entry) => entry.row);
+}
+
 function buildAdminQueryVariants(query: string): string[] {
   const normalizedBase = query.trim().replace(/\s+/g, ' ');
   if (!normalizedBase) return [];
@@ -166,11 +385,26 @@ async function collectScrapedLeadRows(params: {
     ? Math.min(targetCount + ADMIN_EXTRA_RESULT_BUFFER, SCRAPER_BATCH_LIMIT)
     : Math.min(targetCount, SCRAPER_BATCH_LIMIT);
   const queryVariants = enableAdminDeepFill ? buildAdminQueryVariants(query) : [query];
+  const collectionStartedAt = Date.now();
 
   let aggregatedRows: ScrapedLeadRow[] = [];
   let usedRelatedVariants = false;
 
   for (let index = 0; index < queryVariants.length; index++) {
+    const elapsedBeforeVariantMs = Date.now() - collectionStartedAt;
+    const remainingBudgetMs = ADMIN_DEEP_FILL_TIME_BUDGET_MS - elapsedBeforeVariantMs;
+
+    if (
+      enableAdminDeepFill &&
+      index > 0 &&
+      remainingBudgetMs < ADMIN_DEEP_FILL_MIN_REMAINING_MS
+    ) {
+      console.log(
+        `Admin deep fill stopped early for "${query}" in ${displayLocation} to avoid an overlong request (elapsed=${elapsedBeforeVariantMs}ms, rows=${aggregatedRows.length}).`
+      );
+      break;
+    }
+
     const variantQuery = queryVariants[index];
     const fullQuery = `${variantQuery} in ${displayLocation}`;
     const startedAt = Date.now();
@@ -191,8 +425,15 @@ async function collectScrapedLeadRows(params: {
     }
   }
 
+  const rankedRows = rankScrapedLeadRows(
+    aggregatedRows,
+    query,
+    displayLocation,
+    targetCount
+  );
+
   return {
-    rows: aggregatedRows,
+    rows: rankedRows,
     usedRelatedVariants,
   };
 }
@@ -616,18 +857,6 @@ export async function GET(request: NextRequest) {
       limit,
       enableAdminDeepFill,
     });
-    const persistedRows = canUseLeadCache
-      ? await persistScrapedLeads({
-          prismaClient,
-          user,
-          visibleRows: scrapedCollection.rows,
-          query,
-          displayLocation,
-          source,
-          resolvedSearchId,
-        })
-      : [];
-
     const scrapedVisibleRows = scrapedCollection.rows.slice(offset, offset + limit);
     const prospects = canUseLeadCache
       ? (() => {
@@ -651,11 +880,9 @@ export async function GET(request: NextRequest) {
         ? 'mixed'
         : 'fresh';
 
-    if (canUseLeadCache) {
-      console.log(
-        `Saved ${scrapedCollection.rows.length} discovered leads to the Lead table for "${query}" in ${displayLocation}.`
-      );
-    }
+    console.log(
+      `Deferred lead persistence until email enrichment completes for "${query}" in ${displayLocation}.`
+    );
     if (scrapedCollection.usedRelatedVariants) {
       console.log(
         `Admin deep fill used related Google Maps query variants for "${query}" in ${displayLocation}.`

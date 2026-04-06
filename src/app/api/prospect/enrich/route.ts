@@ -28,24 +28,6 @@ function sameHost(a: string, b: string): boolean {
   }
 }
 
-function normalizeWebsiteUrl(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-
-  const parse = (value: string): string | null => {
-    try {
-      const parsed = new URL(value);
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-      return parsed.toString();
-    } catch {
-      return null;
-    }
-  };
-
-  return parse(trimmed) ?? parse(`https://${trimmed}`);
-}
-
 function shouldKeepEmail(email: string): boolean {
   const value = email.toLowerCase().trim();
   if (!EMAIL_VALIDATION_REGEX.test(value)) return false;
@@ -186,7 +168,7 @@ async function fetchHtml(url: string): Promise<string | null> {
 }
 
 async function scrapeEmailsFromWebsite(websiteUrl: string): Promise<string[]> {
-  const normalizedUrl = normalizeWebsiteUrl(websiteUrl);
+  const normalizedUrl = normalizeWebsiteForStorage(websiteUrl, 4000);
   if (!normalizedUrl) return [];
 
   const homepageHtml = await fetchHtml(normalizedUrl);
@@ -238,7 +220,7 @@ export async function POST(request: NextRequest) {
     }
 
     const { url, name, address, leadId } = payload;
-    let normalizedUrl = normalizeWebsiteUrl(url);
+    let normalizedUrl = normalizeWebsiteForStorage(url, 4000);
     let resolvedAddress = normalizeOptionalString(address, 4000);
     let resultEmails: string[] = [];
 
@@ -253,7 +235,7 @@ export async function POST(request: NextRequest) {
       console.log(`Enriching business lead via Google Maps detail lookup: ${name}`);
       const googleMapsData = await lookupGoogleMapsContactData(name, resolvedAddress);
       if (googleMapsData) {
-        normalizedUrl = normalizeWebsiteUrl(googleMapsData.website ?? null);
+        normalizedUrl = normalizeWebsiteForStorage(googleMapsData.website ?? null, 4000);
         resolvedAddress = normalizeOptionalString(googleMapsData.address, 4000) || resolvedAddress;
         resultEmails = Array.isArray(googleMapsData.emails) ? googleMapsData.emails : [];
       }

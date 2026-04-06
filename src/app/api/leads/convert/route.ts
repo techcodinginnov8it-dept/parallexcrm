@@ -8,25 +8,6 @@ import {
   normalizeWebsiteForStorage,
 } from '@/lib/lead-utils';
 
-function normalizeWebsiteUrl(raw: string | null | undefined): string | null {
-  if (!raw || typeof raw !== 'string') return null;
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-
-  const parse = (value: string) => {
-    try {
-      const parsed = new URL(value);
-      if (!['http:', 'https:'].includes(parsed.protocol)) return null;
-      return parsed;
-    } catch {
-      return null;
-    }
-  };
-
-  const parsed = parse(trimmed) ?? parse(`https://${trimmed}`);
-  return parsed?.toString() ?? null;
-}
-
 function normalizeEmail(email: string | null | undefined): string | null {
   if (!email || typeof email !== 'string') return null;
   const trimmed = email.trim().toLowerCase();
@@ -71,7 +52,7 @@ export async function POST(request: NextRequest) {
     const leadId = typeof body?.leadId === 'string' ? body.leadId.trim() : '';
     const name = normalizeOptionalString(body?.name, 255) || '';
     const address = normalizeOptionalString(body?.address, 4000) || '';
-    const website = normalizeWebsiteForStorage(normalizeWebsiteUrl(body?.website), 255);
+    const website = normalizeWebsiteForStorage(body?.website, 255);
     const emails = Array.isArray(body?.emails) ? mergeUniqueEmails(body.emails) : [];
     const primaryEmail = normalizeEmail(emails[0]);
     const contactFirstName = normalizeOptionalString(name, 100) || name.slice(0, 100);

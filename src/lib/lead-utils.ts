@@ -16,6 +16,11 @@ type LeadTagResult = {
 
 const GENERAL_BUSINESS_FALLBACK = 'General Business';
 const DEFAULT_TEXT_LIMIT = 255;
+const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/gi;
+const EMAIL_VALIDATION_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}$/i;
+const IGNORED_EMAIL_PREFIXES = ['noreply@', 'no-reply@', 'example@', 'test@'];
+const WEBSITE_CANDIDATE_REGEX =
+  /(https?:\/\/[^\s<>"')\]]+|www\.[^\s<>"')\]]+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:\/[^\s<>"')\]]*)?)/i;
 
 const BUSINESS_TAG_RULES: Array<{ tag: string; pattern: RegExp }> = [
   {
@@ -74,8 +79,49 @@ function normalizeWhitespace(value: string): string {
   return value.trim().replace(/\s+/g, ' ');
 }
 
-function normalizeEmail(value: string): string {
-  return normalizeWhitespace(value).toLowerCase();
+function stripTrailingPunctuation(value: string): string {
+  return value.replace(/[),;:!?]+$/g, '');
+}
+
+function normalizeEmailCandidate(value: string): string | null {
+  if (!value) return null;
+
+  let normalized = normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/^mailto:/, '')
+    .split('?')[0];
+
+  normalized = normalized.replace(/^[<[(\s'"]+/, '');
+  normalized = normalized.replace(/[>\])\s'"]+$/g, '');
+  normalized = stripTrailingPunctuation(normalized);
+
+  if (!normalized) return null;
+  if (!EMAIL_VALIDATION_REGEX.test(normalized)) return null;
+  if (
+    normalized.endsWith('.png') ||
+    normalized.endsWith('.jpg') ||
+    normalized.endsWith('.jpeg') ||
+    normalized.endsWith('.webp') ||
+    normalized.endsWith('.svg')
+  ) {
+    return null;
+  }
+  if (IGNORED_EMAIL_PREFIXES.some((prefix) => normalized.startsWith(prefix))) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function extractEmailCandidates(value: string): string[] {
+  if (!value || typeof value !== 'string') return [];
+
+  const matches = value.match(EMAIL_REGEX) ?? [];
+  const candidates = [value, ...matches]
+    .map((candidate) => normalizeEmailCandidate(candidate))
+    .filter((candidate): candidate is string => Boolean(candidate));
+
+  return Array.from(new Set(candidates));
 }
 
 function normalizeHost(rawUrl: string | null | undefined): string {
@@ -128,16 +174,30 @@ export function normalizeWebsiteForStorage(
   if (!trimmed) return null;
 
   const parseUrl = (value: string): URL | null => {
+    const sanitizedValue = stripTrailingPunctuation(value.trim());
+    if (!sanitizedValue) return null;
+
     try {
-      return new URL(value);
+      return new URL(sanitizedValue);
     } catch {
       return null;
     }
   };
 
-  const parsed = parseUrl(trimmed) ?? parseUrl(`https://${trimmed}`);
+  const rawCandidate =
+    parseUrl(trimmed) ??
+    parseUrl(`https://${trimmed}`) ??
+    (() => {
+      const match = trimmed.match(WEBSITE_CANDIDATE_REGEX);
+      if (!match?.[0]) return null;
+
+      const candidate = stripTrailingPunctuation(match[0]);
+      return parseUrl(candidate) ?? parseUrl(`https://${candidate}`);
+    })();
+
+  const parsed = rawCandidate;
   if (!parsed || !['http:', 'https:'].includes(parsed.protocol)) {
-    return normalizeOptionalString(trimmed, maxLength);
+    return null;
   }
 
   parsed.hash = '';
@@ -229,8 +289,7 @@ export function mergeUniqueEmails(...collections: Array<string[] | null | undefi
 
   for (const collection of collections) {
     for (const value of collection || []) {
-      const normalized = normalizeEmail(value);
-      if (normalized) {
+      for (const normalized of extractEmailCandidates(value)) {
         merged.add(normalized);
       }
     }

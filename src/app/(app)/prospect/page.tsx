@@ -136,6 +136,24 @@ function formatProspectResultSourceLabel(resultSource?: string | null): string {
   return 'Scraped fresh leads';
 }
 
+async function readJsonResponseSafely(response: Response) {
+  const responseText = await response.text();
+
+  if (!responseText) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(responseText);
+  } catch {
+    return {
+      error: response.ok
+        ? 'The server returned an unreadable search response.'
+        : `The server returned an invalid error response (${response.status}).`,
+    };
+  }
+}
+
 export default function ProspectingPage() {
   const [itemsPerPage, setItemsPerPage] = useState(DEFAULT_ITEMS_PER_PAGE);
   const [hasResolvedRole, setHasResolvedRole] = useState(false);
@@ -352,6 +370,55 @@ export default function ProspectingPage() {
   const getRowKey = (prospect: ProspectResult) =>
     prospect.source_id || `${prospect.name}|${prospect.website || ''}|${prospect.address || ''}`;
 
+  const mergeProspectEmails = (left: string[], right: string[]) =>
+    Array.from(new Set([...(left || []), ...(right || [])]));
+
+  const getStatusPriority = (status: ProspectResult['status']) => {
+    switch (status) {
+      case 'saved':
+        return 6;
+      case 'stored':
+        return 5;
+      case 'enriched':
+        return 4;
+      case 'enriching':
+        return 3;
+      case 'found':
+        return 2;
+      case 'unavailable':
+        return 1;
+      default:
+        return 0;
+    }
+  };
+
+  const mergeProspectRow = (
+    existing: ProspectResult,
+    incoming: ProspectResult
+  ): ProspectResult => {
+    const mergedEmails = mergeProspectEmails(existing.emails, incoming.emails);
+    const preferredStatus =
+      getStatusPriority(incoming.status) > getStatusPriority(existing.status)
+        ? incoming.status
+        : existing.status;
+
+    return {
+      ...existing,
+      ...incoming,
+      source_id: incoming.source_id || existing.source_id,
+      name: incoming.name || existing.name,
+      website: incoming.website || existing.website,
+      address: incoming.address || existing.address,
+      emails: mergedEmails,
+      status:
+        mergedEmails.length > 0 && preferredStatus !== 'saved' && preferredStatus !== 'stored'
+          ? 'enriched'
+          : preferredStatus,
+      category: incoming.category || existing.category,
+      rating: incoming.rating || existing.rating,
+    };
+  };
+
   const shouldAutoEnrich = (prospect: ProspectResult) =>
     Boolean(prospect.name) &&
     prospect.emails.length === 0 &&
@@ -361,7 +428,6 @@ export default function ProspectingPage() {
 
   const shouldAutoSave = (prospect: ProspectResult) =>
     Boolean(prospect.name) &&
-    Boolean(prospect.source_id) &&
     prospect.emails.length > 0 &&
     prospect.status !== 'saved' &&
     prospect.status !== 'stored';
@@ -389,13 +455,58 @@ export default function ProspectingPage() {
     });
 
   const dedupeProspectRows = (rows: ProspectResult[]) => {
-    const seen = new Set<string>();
-    return rows.filter((row) => {
-      const key = getProspectIdentity(row);
-      if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    const rowsBySourceId = new Map<string, ProspectResult>();
+    const rowsByIdentity = new Map<string, ProspectResult>();
+
+    for (const row of rows) {
+      const identityKey = getProspectIdentity(row);
+      const sourceIdKey = row.source_id?.trim() || null;
+
+      if (sourceIdKey && rowsBySourceId.has(sourceIdKey)) {
+        const merged = mergeProspectRow(rowsBySourceId.get(sourceIdKey)!, row);
+        rowsBySourceId.set(sourceIdKey, merged);
+        if (identityKey) {
+          rowsByIdentity.set(identityKey, merged);
+        }
+        continue;
+      }
+
+      if (identityKey && rowsByIdentity.has(identityKey)) {
+        const merged = mergeProspectRow(rowsByIdentity.get(identityKey)!, row);
+        rowsByIdentity.set(identityKey, merged);
+        if (sourceIdKey) {
+          rowsBySourceId.set(sourceIdKey, merged);
+        }
+        continue;
+      }
+
+      if (sourceIdKey) {
+        rowsBySourceId.set(sourceIdKey, row);
+      }
+
+      if (identityKey) {
+        rowsByIdentity.set(identityKey, row);
+      }
+    }
+
+    const dedupedRows: ProspectResult[] = [];
+    const seenRowKeys = new Set<string>();
+
+    for (const row of rowsBySourceId.values()) {
+      const key = getRowKey(row);
+      if (seenRowKeys.has(key)) continue;
+      seenRowKeys.add(key);
+      dedupedRows.push(row);
+    }
+
+    for (const row of rowsByIdentity.values()) {
+      const key = getRowKey(row);
+      if (seenRowKeys.has(key)) continue;
+      seenRowKeys.add(key);
+      dedupedRows.push(row);
+    }
+
+    return dedupedRows;
   };
 
   const reviveStoredRows = (incoming: any[]): ProspectResult[] =>
@@ -434,18 +545,25 @@ export default function ProspectingPage() {
     );
 
   const mergeUniqueRows = (prev: ProspectResult[], incoming: ProspectResult[]) => {
-    const seen = new Set(
-      prev.map((r) => getProspectIdentity(r))
-    );
-    const merged = [...prev];
-    for (const row of incoming) {
-      const key = getProspectIdentity(row);
-      if (!seen.has(key)) {
-        seen.add(key);
-        merged.push(row);
+    return dedupeProspectRows([...prev, ...incoming]);
+  };
+
+  const dedupeRowsByRowKey = (rows: ProspectResult[]) => {
+    const rowsByKey = new Map<string, ProspectResult>();
+
+    for (const row of rows) {
+      const rowKey = getRowKey(row);
+      if (!rowKey) continue;
+
+      if (rowsByKey.has(rowKey)) {
+        rowsByKey.set(rowKey, mergeProspectRow(rowsByKey.get(rowKey)!, row));
+        continue;
       }
+
+      rowsByKey.set(rowKey, row);
     }
-    return merged;
+
+    return Array.from(rowsByKey.values());
   };
 
   const countNewRows = (existingRows: ProspectResult[], incomingRows: ProspectResult[]) =>
@@ -723,6 +841,10 @@ export default function ProspectingPage() {
   };
 
   const saveLeadToDatabase = async (prospect: ProspectResult) => {
+    const activeSearchSnapshot = activeSearchRef.current;
+    const locationLabel = activeSearchSnapshot
+      ? getSearchLocationLabel(activeSearchSnapshot)
+      : '';
     const response = await fetch('/api/prospect/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -732,6 +854,12 @@ export default function ProspectingPage() {
         website: prospect.website,
         address: prospect.address,
         emails: prospect.emails,
+        category: prospect.category,
+        rating: prospect.rating,
+        searchId: searchIdRef.current,
+        searchQuery: activeSearchSnapshot?.query || activeQueryTermRef.current,
+        locationLabel,
+        source: prospect.source || 'google_maps',
       }),
     });
     const data = await response.json().catch(() => null);
@@ -739,6 +867,8 @@ export default function ProspectingPage() {
     if (!response.ok) {
       throw new Error(data?.error || 'Failed to save lead to database');
     }
+
+    return data;
   };
 
   const convertProspectToCRM = async (prospect: ProspectResult) => {
@@ -781,11 +911,13 @@ export default function ProspectingPage() {
 
       void (async () => {
         try {
-          await saveLeadToDatabase(prospect);
+          const payload = await saveLeadToDatabase(prospect);
+          const savedLeadId =
+            typeof payload?.data?.lead_id === 'string' ? payload.data.lead_id : prospect.source_id;
           syncResultsSnapshot((prev) =>
             prev.map((row) =>
               getRowKey(row) === rowKey
-                ? { ...row, status: 'stored' }
+                ? { ...row, source_id: savedLeadId, status: 'stored' }
                 : row
             )
           );
@@ -897,7 +1029,7 @@ export default function ProspectingPage() {
     try {
       const url = buildSearchUrl(1, submittedSearch, submittedSearch.query);
       const res = await fetch(url);
-      const data = await res.json();
+      const data = await readJsonResponseSafely(res);
       
       if (res.ok) {
         const firstBatch = markRowsForAutoEnrichment(normalizeIncomingRows(data.data || []));
@@ -932,13 +1064,17 @@ export default function ProspectingPage() {
         }
       }
     } catch (err) {
+      const errorMessage =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Search request failed before the server could respond.';
       const failedSnapshot = buildSessionSnapshot({
         activeSearch: submittedSearch,
         activeQueryTerm: submittedSearch.query,
         queryVariantIndex: 0,
         isSearching: false,
-        searchError: 'Network error during search',
-        lastScrapeSummary: 'Scraping failed due to a network issue.',
+        searchError: errorMessage,
+        lastScrapeSummary: 'Scraping failed before the server returned a usable response.',
       });
       if (failedSnapshot) {
         commitSessionSnapshot(failedSnapshot);
@@ -977,7 +1113,7 @@ export default function ProspectingPage() {
         attempts++;
         const url = buildSearchUrl(workingPage, activeSearch, workingQueryTerm, workingSearchId);
         const res = await fetch(url);
-        const data = await res.json();
+        const data = await readJsonResponseSafely(res);
 
         if (!res.ok) {
           setSearchError(parseApiError(data, 'Failed to load more results'));
@@ -1060,7 +1196,7 @@ export default function ProspectingPage() {
   const hasRelatedQueryFallback = queryVariantIndex < Math.max(relatedQueries.length - 1, 0);
   const canLoadMore = hasMoreResults || hasRelatedQueryFallback;
   const visibleResults = useMemo(
-    () => results.filter((row) => shouldDisplayProspect(row)),
+    () => dedupeRowsByRowKey(results.filter((row) => shouldDisplayProspect(row))),
     [results]
   );
   const categorySuggestions = Array.from(
@@ -1532,6 +1668,7 @@ export default function ProspectingPage() {
         columns={columns} 
         isLoading={false}
         maxVisibleRows={20}
+        scrollViewportBottomOffset={110}
         getRowId={(row) => row.source_id || `${row.name}-${row.website || ''}-${row.address || ''}`}
         selectedRows={selectedRows}
         onSelectionChange={setSelectedRows}

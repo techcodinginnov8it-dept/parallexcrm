@@ -1,6 +1,7 @@
 import { chromium, Browser, BrowserContext, Page, Locator } from 'playwright-chromium';
 import pLimit from 'p-limit';
 import axios from 'axios';
+import { normalizeWebsiteForStorage } from '@/lib/lead-utils';
 
 export interface GoogleMapResult {
   name: string;
@@ -84,23 +85,7 @@ function isGoogleOwnedHost(hostname: string): boolean {
 }
 
 function normalizeWebsiteUrl(raw: string | null): string | null {
-  if (!raw) return null;
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-
-  const tryParse = (value: string): string | null => {
-    try {
-      const parsed = new URL(value);
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        return null;
-      }
-      return parsed.toString();
-    } catch {
-      return null;
-    }
-  };
-
-  return tryParse(trimmed) ?? tryParse(`https://${trimmed}`);
+  return normalizeWebsiteForStorage(raw, 4000);
 }
 
 function normalizeMapsUrl(raw: string | null): string | null {

@@ -22,6 +22,7 @@ interface DataTableProps<T> {
   columns: ColumnDef<T>[];
   isLoading?: boolean;
   maxVisibleRows?: number;
+  scrollViewportBottomOffset?: number;
   pagination?: PaginationState;
   onPageChange?: (page: number) => void;
   onLimitChange?: (limit: number) => void;
@@ -37,6 +38,7 @@ export function DataTable<T>({
   columns,
   isLoading = false,
   maxVisibleRows,
+  scrollViewportBottomOffset = 0,
   pagination,
   onPageChange,
   onLimitChange,
@@ -46,6 +48,8 @@ export function DataTable<T>({
   onSelectionChange,
   getRowId
 }: DataTableProps<T>) {
+  const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const [viewportAwareMaxHeight, setViewportAwareMaxHeight] = React.useState<number | null>(null);
   
   const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!onSelectionChange) return;
@@ -71,14 +75,43 @@ export function DataTable<T>({
   const shouldScroll = Boolean(maxVisibleRows && data.length > maxVisibleRows);
   const estimatedHeaderHeight = 48;
   const estimatedRowHeight = 56;
-  const maxTableHeight =
+  const rowLimitedHeight =
     shouldScroll && maxVisibleRows
-      ? `${estimatedHeaderHeight + (maxVisibleRows * estimatedRowHeight)}px`
+      ? estimatedHeaderHeight + (maxVisibleRows * estimatedRowHeight)
+      : null;
+
+  React.useEffect(() => {
+    if (!shouldScroll || typeof window === 'undefined') {
+      setViewportAwareMaxHeight(null);
+      return;
+    }
+
+    const updateMaxHeight = () => {
+      const container = scrollContainerRef.current;
+      if (!container || !rowLimitedHeight) return;
+
+      const rect = container.getBoundingClientRect();
+      const availableHeight = Math.floor(window.innerHeight - rect.top - scrollViewportBottomOffset);
+      const minimumTableHeight = estimatedHeaderHeight + (estimatedRowHeight * 3);
+      const nextMaxHeight = Math.max(Math.min(rowLimitedHeight, availableHeight), minimumTableHeight);
+
+      setViewportAwareMaxHeight((prev) => (prev === nextMaxHeight ? prev : nextMaxHeight));
+    };
+
+    updateMaxHeight();
+    window.addEventListener('resize', updateMaxHeight);
+    return () => window.removeEventListener('resize', updateMaxHeight);
+  }, [estimatedHeaderHeight, estimatedRowHeight, rowLimitedHeight, scrollViewportBottomOffset, shouldScroll]);
+
+  const maxTableHeight =
+    shouldScroll && rowLimitedHeight
+      ? `${viewportAwareMaxHeight ?? rowLimitedHeight}px`
       : undefined;
 
   return (
     <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <div
+        ref={scrollContainerRef}
         style={{
           overflowX: 'auto',
           overflowY: shouldScroll ? 'auto' : 'visible',
@@ -144,8 +177,9 @@ export function DataTable<T>({
             ) : (
               data.map((row, rowIdx) => {
                 const rId = getRowId(row);
+                const renderKey = `${rId}__${rowIdx}`;
                 return (
-                  <tr key={rId} className={selectedRows.has(rId) ? 'selected' : ''}>
+                  <tr key={renderKey} className={selectedRows.has(rId) ? 'selected' : ''}>
                     {onSelectionChange && (
                       <td style={{ textAlign: 'center' }}>
                         <input 

@@ -1,7 +1,8 @@
-import type { Browser, BrowserContext, Page, Locator } from 'playwright-chromium';
+import type { Browser, BrowserContext, Page, Locator } from 'playwright-core';
 import pLimit from 'p-limit';
 import axios from 'axios';
 import { normalizeWebsiteForStorage } from '@/lib/lead-utils';
+import { launchChromiumBrowser } from '@/lib/scrapers/browser-launcher';
 
 export interface GoogleMapResult {
   name: string;
@@ -72,19 +73,6 @@ const GENERIC_SINGLE_RESULT_NAMES = new Set([
 ]);
 
 const limit = pLimit(ENRICHMENT_CONCURRENCY);
-let playwrightChromiumPromise: Promise<typeof import('playwright-chromium')> | null = null;
-
-async function getPlaywrightChromium() {
-  if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
-    process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
-  }
-
-  if (!playwrightChromiumPromise) {
-    playwrightChromiumPromise = import('playwright-chromium');
-  }
-
-  return playwrightChromiumPromise;
-}
 
 function normalizeHost(hostname: string): string {
   return hostname.replace(/^www\./i, '').toLowerCase();
@@ -675,7 +663,6 @@ export async function scrapeGoogleMaps(
   let browser: Browser | null = null;
   let detailPage: Page | null = null;
   try {
-    const { chromium } = await getPlaywrightChromium();
     const safeLimit = Math.min(Math.max(maxResults, 1), MAX_LIMIT);
     const startAt = Math.max(offset, 0);
     const targetCount = startAt + safeLimit;
@@ -684,10 +671,7 @@ export async function scrapeGoogleMaps(
     const scrollDistance = targetCount > LARGE_BATCH_THRESHOLD ? 2800 : 2000;
     const scrollWaitMs = targetCount > LARGE_BATCH_THRESHOLD ? 1100 : 900;
 
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--disable-setuid-sandbox', '--no-sandbox']
-    });
+    browser = await launchChromiumBrowser();
     const context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     });

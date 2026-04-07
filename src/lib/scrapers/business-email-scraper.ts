@@ -1,5 +1,6 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import { launchChromiumBrowser } from '@/lib/scrapers/browser-launcher';
 
 export interface BusinessScrapeInput {
   name: string;
@@ -235,26 +236,13 @@ export async function scrapeGoogleMaps(
   const retries = options.retries ?? 2;
 
   const attempt = async (): Promise<{ emails: string[]; website: string | null }> => {
-    let imported: any;
-    try {
-      imported = (await import('puppeteer')) as any;
-    } catch {
-      throw new Error(
-        'Puppeteer is required for Google Maps scraping. Install it with: npm install puppeteer'
-      );
-    }
-    const puppeteer = imported?.default ?? imported;
-
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+    const browser = await launchChromiumBrowser();
 
     try {
-      const page = await browser.newPage();
-      await page.setUserAgent(USER_AGENT);
+      const context = await browser.newContext({ userAgent: USER_AGENT });
+      const page = await context.newPage();
       await page.goto(normalizedMapsUrl, {
-        waitUntil: 'networkidle2',
+        waitUntil: 'domcontentloaded',
         timeout: timeoutMs,
       });
       await page.waitForTimeout(1500);

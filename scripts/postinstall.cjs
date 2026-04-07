@@ -1,6 +1,10 @@
 const { execFileSync } = require('child_process');
 const path = require('path');
 
+function isTruthy(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').toLowerCase());
+}
+
 function runNodeScript(label, scriptPath, args = [], env = process.env) {
   console.log(`[postinstall] ${label}`);
   execFileSync(process.execPath, [require.resolve(scriptPath), ...args], {
@@ -17,19 +21,41 @@ function runNodeFile(label, filePath, args = [], env = process.env) {
   });
 }
 
-function shouldInstallPlaywrightBrowsers() {
-  return (
-    process.env.VERCEL === '1' ||
-    process.env.CI === '1' ||
-    process.env.INSTALL_PLAYWRIGHT_BROWSERS === '1'
-  );
+function getPlaywrightInstallReason() {
+  if (isTruthy(process.env.SKIP_PLAYWRIGHT_BROWSERS)) {
+    return null;
+  }
+
+  if (isTruthy(process.env.INSTALL_PLAYWRIGHT_BROWSERS)) {
+    return 'INSTALL_PLAYWRIGHT_BROWSERS';
+  }
+
+  if (isTruthy(process.env.VERCEL)) {
+    return 'VERCEL';
+  }
+
+  if (isTruthy(process.env.CI)) {
+    return 'CI';
+  }
+
+  // Vercel can disable automatic system env exposure, which would make
+  // VERCEL/CI unavailable during install. Production installs still need the
+  // browser copied into node_modules so serverless tracing can bundle it.
+  if (process.env.NODE_ENV === 'production') {
+    return 'NODE_ENV=production';
+  }
+
+  return null;
 }
 
 function main() {
   runNodeScript('Generating Prisma client', 'prisma/build/index.js', ['generate']);
 
-  if (!shouldInstallPlaywrightBrowsers()) {
-    console.log('[postinstall] Skipping Playwright browser install outside CI/Vercel.');
+  const installReason = getPlaywrightInstallReason();
+  if (!installReason) {
+    console.log(
+      '[postinstall] Skipping Playwright browser install. Set INSTALL_PLAYWRIGHT_BROWSERS=1 to bundle browsers for serverless deployments.'
+    );
     return;
   }
 
@@ -41,7 +67,7 @@ function main() {
   const playwrightCliPath = path.join(playwrightPackageRoot, 'cli.js');
 
   runNodeFile(
-    'Installing Playwright Chromium headless shell',
+    `Installing Playwright Chromium headless shell (${installReason})`,
     playwrightCliPath,
     ['install', '--only-shell', 'chromium'],
     playwrightEnv

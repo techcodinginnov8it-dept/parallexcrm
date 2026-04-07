@@ -2,7 +2,7 @@ const path = require('path');
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  serverExternalPackages: ['playwright-chromium'],
+  serverExternalPackages: ['playwright-chromium', 'playwright-core'],
   outputFileTracingRoot: path.resolve(__dirname),
   outputFileTracingIncludes: {
     '/api/prospect/search': [

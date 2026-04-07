@@ -6,6 +6,9 @@ import { lookupGoogleMapsContactData } from '@/lib/scrapers/google-maps-scraper'
 import { getPrismaClient } from '@/lib/db';
 import { mergeUniqueEmails, normalizeOptionalString, normalizeWebsiteForStorage } from '@/lib/lead-utils';
 
+export const runtime = 'nodejs';
+export const maxDuration = 60;
+
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/gi;
 const EMAIL_VALIDATION_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}$/i;
 const IGNORED_EMAIL_PREFIXES = ['noreply@', 'no-reply@', 'example@', 'test@'];

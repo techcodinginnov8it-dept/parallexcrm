@@ -13,6 +13,9 @@ import {
   normalizeWebsiteForStorage,
 } from '@/lib/lead-utils';
 
+export const runtime = 'nodejs';
+export const maxDuration = 60;
+
 type ProspectLeadRow = Pick<
   Lead,
   | 'id'

@@ -9,7 +9,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "seed:accounts": "tsx scripts/seed-default-accounts.ts"
+    "seed:accounts": "tsx scripts/seed-default-accounts.ts",
+    "db:bootstrap:sequences": "prisma db execute --file prisma/migrations/20260409_add_sequence_backend_tables/migration.sql"
   },
   "keywords": [],
   "author": "",

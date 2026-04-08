@@ -2,6 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import AppUsageBadge from './AppUsageBadge';
 
 interface TopbarProps {
   user?: {
@@ -38,6 +39,7 @@ export default function Topbar({ user }: TopbarProps) {
       </div>
 
       <div className="topbar-actions">
+        <AppUsageBadge />
         {formattedRole && (
           <span
             style={{

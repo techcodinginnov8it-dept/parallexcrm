@@ -161,6 +161,7 @@ export async function getCurrentUser() {
         last_name: lastName,
         org_id: organizationId,
         role,
+        last_login_at: new Date(),
       },
       include: USER_INCLUDE,
     });

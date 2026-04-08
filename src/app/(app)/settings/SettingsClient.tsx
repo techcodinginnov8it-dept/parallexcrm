@@ -175,11 +175,28 @@ export default function SettingsClient({ currentUser }: SettingsClientProps) {
           className="glass-panel"
           style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}
         >
-          <div>
-            <h2 style={{ margin: '0 0 0.35rem 0', fontSize: '1rem' }}>Workspace Users</h2>
-            <p style={{ color: 'var(--text-secondary)', margin: 0 }}>
-              Update each teammate&apos;s role from here.
-            </p>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <h2 style={{ margin: '0 0 0.35rem 0', fontSize: '1rem' }}>Workspace Users</h2>
+              <p style={{ color: 'var(--text-secondary)', margin: 0 }}>
+                Update each teammate&apos;s role from here.
+              </p>
+            </div>
+            {!isLoading && (
+              <div
+                style={{
+                  padding: '0.25rem 0.75rem',
+                  backgroundColor: 'var(--bg-secondary)',
+                  borderRadius: 'var(--radius-full)',
+                  fontSize: '0.85rem',
+                  fontWeight: 500,
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border)',
+                }}
+              >
+                Workspace Users: {users.length}
+              </div>
+            )}
           </div>
 
           {statusMessage && (

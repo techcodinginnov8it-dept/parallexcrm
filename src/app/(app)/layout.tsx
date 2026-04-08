@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import Sidebar from '@/components/layout/Sidebar';
 import Topbar from '@/components/layout/Topbar';
+import AppPresenceTracker from '@/components/layout/AppPresenceTracker';
 import { getCurrentUser } from '@/lib/api-utils';
 
 export default async function AppLayout({
@@ -22,6 +23,7 @@ export default async function AppLayout({
 
   return (
     <div className="app-layout">
+      <AppPresenceTracker />
       <Sidebar user={profile} />
       <main className="main-content">
         <Topbar user={profile} />

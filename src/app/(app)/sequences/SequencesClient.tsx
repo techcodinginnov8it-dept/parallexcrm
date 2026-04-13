@@ -1,18 +1,24 @@
 'use client';
 
-import { useEffect, useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import useSWR from 'swr';
 import {
   Activity,
+  Bold,
   CalendarClock,
   ChevronRight,
   CheckCircle2,
   Clock3,
+  Code,
   Eye,
+  Image,
+  Italic,
   LayoutPanelTop,
+  Link2,
   ListChecks,
   Mail,
   PauseCircle,
+  Paperclip,
   PhoneCall,
   PlayCircle,
   Plus,
@@ -22,6 +28,7 @@ import {
   Sparkles,
   Settings2,
   Trash2,
+  Underline,
   UserPlus,
   Users,
   Workflow,
@@ -350,33 +357,64 @@ function formatDelayLabel(delayDays: number) {
   return `Runs in ${delayDays} days`;
 }
 
-function VariableHint() {
+function VariableToolbar({
+  onInsert,
+  onNotice,
+  onFormat,
+  onWriteAi,
+}: {
+  onInsert?: (token: string) => void;
+  onNotice?: (label: string) => void;
+  onFormat?: (action: 'bold' | 'italic' | 'underline' | 'link' | 'image' | 'code' | 'attach') => void;
+  onWriteAi?: () => void;
+}) {
   return (
-    <div
-      style={{
-        marginTop: '0.75rem',
-        fontSize: '0.76rem',
-        color: 'var(--text-muted)',
-        lineHeight: 1.6,
-      }}
-    >
-      Available variables:{' '}
-      {CONTACT_VARIABLE_TOKENS.map((token, index) => (
-        <span key={token}>
-          <code
-            style={{
-              fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)',
-              background: 'var(--primary-subtle)',
-              borderRadius: '999px',
-              padding: '0.1rem 0.45rem',
-              color: 'var(--primary-hover)',
-            }}
-          >
+    <div className="sequence-editor-toolbar">
+      <button
+        type="button"
+        className="btn btn-secondary btn-sm"
+        onClick={() => onWriteAi?.()}
+      >
+        Write with AI
+      </button>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => onFormat?.('bold')}>
+        <Bold size={14} />
+      </button>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => onFormat?.('italic')}>
+        <Italic size={14} />
+      </button>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => onFormat?.('underline')}>
+        <Underline size={14} />
+      </button>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => onFormat?.('link')}>
+        <Link2 size={14} />
+      </button>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => onFormat?.('image')}>
+        <Image size={14} />
+      </button>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => onFormat?.('attach')}>
+        <Paperclip size={14} />
+      </button>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => onFormat?.('code')}>
+        <Code size={14} />
+      </button>
+      <select
+        className="form-input"
+        style={{ maxWidth: '220px' }}
+        defaultValue=""
+        onChange={(event) => {
+          const token = event.target.value;
+          if (token) onInsert?.(token);
+          event.target.value = '';
+        }}
+      >
+        <option value="">Insert variable</option>
+        {CONTACT_VARIABLE_TOKENS.map((token) => (
+          <option key={token} value={token}>
             {token}
-          </code>
-          {index < CONTACT_VARIABLE_TOKENS.length - 1 ? ' ' : ''}
-        </span>
-      ))}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
@@ -400,6 +438,15 @@ export default function SequencesClient() {
   const [isRunningDueSteps, setIsRunningDueSteps] = useState(false);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [previewContactId, setPreviewContactId] = useState<string | null>(null);
+  const [lastFocusedField, setLastFocusedField] = useState<{
+    stepId: string;
+    field: 'subject' | 'body';
+  } | null>(null);
+  const lastFocusedInputRef = useRef<{
+    element: HTMLInputElement | HTMLTextAreaElement | HTMLDivElement | null;
+    stepId: string;
+    field: 'subject' | 'body';
+  } | null>(null);
 
   const listQuery = useMemo(() => {
     const params = new URLSearchParams({
@@ -498,6 +545,122 @@ export default function SequencesClient() {
       ...current,
       steps: current.steps.map((step) => (step.id === stepId ? { ...step, [key]: value } : step)),
     }));
+  };
+
+  const applyTextEdit = (
+    text: string,
+    options?: {
+      wrap?: { start: string; end: string; placeholder?: string };
+      preferReplace?: boolean;
+      build?: (selectedText: string) => string;
+    }
+  ) => {
+    const fallbackStepId = lastFocusedField?.stepId || selectedStep?.id;
+    const fallbackField = lastFocusedField?.field || 'body';
+    const ref = lastFocusedInputRef.current;
+    const stepId = ref?.stepId || fallbackStepId;
+    const field = ref?.field || fallbackField;
+    if (!stepId) return;
+
+    const currentStep = draft.steps.find((step) => step.id === stepId);
+    if (!currentStep) return;
+
+    const currentValue = field === 'subject' ? currentStep.subject : currentStep.body;
+    const element = ref?.element;
+    if (element && element instanceof HTMLDivElement && element.isContentEditable) {
+      if (options?.build) {
+        const selection = window.getSelection();
+        const selectedText = selection?.toString() || '';
+        const insertValue = options.build(selectedText);
+        document.execCommand('insertHTML', false, insertValue);
+      } else {
+        document.execCommand('insertText', false, text);
+      }
+      applyStep(stepId, field, element.innerHTML as SequenceStep[typeof field]);
+      return;
+    }
+
+    const selectionStart = (element as HTMLInputElement | HTMLTextAreaElement | null)?.selectionStart ?? currentValue.length;
+    const selectionEnd = (element as HTMLInputElement | HTMLTextAreaElement | null)?.selectionEnd ?? currentValue.length;
+    const selectedText = currentValue.slice(selectionStart, selectionEnd);
+    const wrap = options?.wrap;
+    const insertValue = options?.build
+      ? options.build(selectedText)
+      : wrap
+        ? `${wrap.start}${selectedText || wrap.placeholder || text}${wrap.end}`
+        : text;
+    const nextValue =
+      options?.preferReplace && !selectedText && !currentValue
+        ? insertValue
+        : `${currentValue.slice(0, selectionStart)}${insertValue}${currentValue.slice(selectionEnd)}`;
+
+    applyStep(stepId, field, nextValue as SequenceStep[typeof field]);
+
+    if (element) {
+      requestAnimationFrame(() => {
+        element.focus();
+        const cursor = selectionStart + insertValue.length;
+        element.selectionStart = cursor;
+        element.selectionEnd = cursor;
+      });
+    }
+  };
+
+  const insertVariableToken = (token: string) => {
+    const element = lastFocusedInputRef.current?.element;
+    if (element && element instanceof HTMLDivElement && element.isContentEditable) {
+      document.execCommand('insertText', false, token);
+      applyStep(lastFocusedInputRef.current?.stepId || selectedStep?.id || '', lastFocusedInputRef.current?.field || 'body', element.innerHTML as SequenceStep['body']);
+      return;
+    }
+
+    const spacer =
+      (element as HTMLInputElement | HTMLTextAreaElement | null)?.selectionStart ||
+      !(lastFocusedField?.field === 'subject' || lastFocusedField?.field === 'body')
+        ? ''
+        : ' ';
+    applyTextEdit(`${spacer}${token}`);
+  };
+
+  const handleToolbarFormat = (action: 'bold' | 'italic' | 'underline' | 'link' | 'image' | 'code' | 'attach') => {
+    const element = lastFocusedInputRef.current?.element;
+    if (element && element instanceof HTMLDivElement && element.isContentEditable) {
+      if (action === 'bold') return document.execCommand('bold');
+      if (action === 'italic') return document.execCommand('italic');
+      if (action === 'underline') return document.execCommand('underline');
+      if (action === 'code') return applyTextEdit('code', { build: (selectedText) => `<code>${selectedText || 'code'}</code>` });
+      if (action === 'link') {
+        const url = window.prompt('Enter link URL', 'https://');
+        if (!url) return;
+        return document.execCommand('createLink', false, url);
+      }
+      if (action === 'image') {
+        const url = window.prompt('Enter image URL', 'https://');
+        if (!url) return;
+        return document.execCommand('insertImage', false, url);
+      }
+      if (action === 'attach') return notifyInDev('Attachment');
+    }
+
+    if (action === 'bold') return applyTextEdit('bold', { wrap: { start: '**', end: '**', placeholder: 'bold text' } });
+    if (action === 'italic') return applyTextEdit('italic', { wrap: { start: '*', end: '*', placeholder: 'italic text' } });
+    if (action === 'underline') return applyTextEdit('underline', { wrap: { start: '__', end: '__', placeholder: 'underlined text' } });
+    if (action === 'code') return applyTextEdit('code', { wrap: { start: '`', end: '`', placeholder: 'inline code' } });
+    if (action === 'link') {
+      const url = window.prompt('Enter link URL', 'https://');
+      if (!url) return;
+      return applyTextEdit('link', { build: (selectedText) => `${selectedText || 'link text'} (${url})` });
+    }
+    if (action === 'image') return applyTextEdit('image', { build: () => `[image: ${window.prompt('Image URL', 'https://') || ''}]` });
+    if (action === 'attach') return notifyInDev('Attachment');
+  };
+
+  const handleWriteAi = () => {
+    const template =
+      lastFocusedField?.field === 'subject'
+        ? 'Quick question'
+        : 'Hi {{first_name}},\n\nWanted to reach out because...\n\nBest,\n{{full_name}}';
+    applyTextEdit(template, { preferReplace: true });
   };
 
   const resetComposer = () => {
@@ -1097,17 +1260,46 @@ export default function SequencesClient() {
                               className="form-input"
                               value={selectedStep.subject}
                               onChange={(event) => applyStep(selectedStep.id, 'subject', event.target.value)}
+                              onFocus={() => setLastFocusedField({ stepId: selectedStep.id, field: 'subject' })}
+                              ref={(element) => {
+                                if (!element) return;
+                                if (lastFocusedField?.stepId === selectedStep.id && lastFocusedField?.field === 'subject') {
+                                  lastFocusedInputRef.current = { element, stepId: selectedStep.id, field: 'subject' };
+                                }
+                              }}
                             />
                           </div>
                           <div className="form-group" style={{ marginBottom: 0 }}>
                             <label className="form-label">Body</label>
-                            <textarea
-                              className="form-input sequence-editor-textarea"
-                              value={selectedStep.body}
-                              onChange={(event) => applyStep(selectedStep.id, 'body', event.target.value)}
+                            <div
+                              className="sequence-editor-richtext"
+                              contentEditable
+                              suppressContentEditableWarning
+                              data-placeholder="Write your email..."
+                              onInput={(event) =>
+                                applyStep(
+                                  selectedStep.id,
+                                  'body',
+                                  (event.currentTarget as HTMLDivElement).innerHTML
+                                )
+                              }
+                              onFocus={(event) => {
+                                setLastFocusedField({ stepId: selectedStep.id, field: 'body' });
+                                lastFocusedInputRef.current = {
+                                  element: event.currentTarget,
+                                  stepId: selectedStep.id,
+                                  field: 'body',
+                                };
+                              }}
+                              dangerouslySetInnerHTML={{ __html: selectedStep.body || '' }}
                             />
                           </div>
-                          <VariableHint />
+                          <VariableToolbar
+                            onInsert={insertVariableToken}
+                            onNotice={notifyInDev}
+                            onFormat={handleToolbarFormat}
+                            onWriteAi={handleWriteAi}
+                          />
                         </>
                       )}
 
@@ -1121,9 +1313,22 @@ export default function SequencesClient() {
                               className="form-input sequence-editor-textarea"
                               value={selectedStep.body}
                               onChange={(event) => applyStep(selectedStep.id, 'body', event.target.value)}
+                              onFocus={(event) => {
+                                setLastFocusedField({ stepId: selectedStep.id, field: 'body' });
+                                lastFocusedInputRef.current = {
+                                  element: event.currentTarget,
+                                  stepId: selectedStep.id,
+                                  field: 'body',
+                                };
+                              }}
                             />
                           </div>
-                          <VariableHint />
+                          <VariableToolbar
+                            onInsert={insertVariableToken}
+                            onNotice={notifyInDev}
+                            onFormat={handleToolbarFormat}
+                            onWriteAi={handleWriteAi}
+                          />
                         </>
                       )}
                     </div>
@@ -1180,7 +1385,12 @@ export default function SequencesClient() {
                                 ? 'Body'
                                 : 'Instructions'}
                             </div>
-                            <div className="sequence-preview-body">{previewBody || 'Add content to preview this step.'}</div>
+                            <div
+                              className="sequence-preview-body"
+                              dangerouslySetInnerHTML={{
+                                __html: previewBody || 'Add content to preview this step.',
+                              }}
+                            />
                           </div>
                         </>
                       ) : (

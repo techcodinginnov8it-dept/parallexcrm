@@ -26,7 +26,10 @@ export async function GET(_request: NextRequest, context: RouteContext) {
     if (error instanceof SequenceStoreError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    return NextResponse.json({ error: 'Failed to fetch sequence detail.' }, { status: 500 });
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to fetch sequence detail.' },
+      { status: 500 }
+    );
   }
 }
 
@@ -51,6 +54,9 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     if (error instanceof SequenceStoreError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    return NextResponse.json({ error: 'Failed to update sequence.' }, { status: 500 });
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to update sequence.' },
+      { status: 500 }
+    );
   }
 }

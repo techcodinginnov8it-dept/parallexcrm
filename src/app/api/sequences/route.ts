@@ -36,7 +36,10 @@ export async function GET(request: NextRequest) {
     if (error instanceof SequenceStoreError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    return NextResponse.json({ error: 'Failed to fetch sequences.' }, { status: 500 });
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to fetch sequences.' },
+      { status: 500 }
+    );
   }
 }
 
@@ -60,6 +63,9 @@ export async function POST(request: NextRequest) {
     if (error instanceof SequenceStoreError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    return NextResponse.json({ error: 'Failed to create sequence.' }, { status: 500 });
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to create sequence.' },
+      { status: 500 }
+    );
   }
 }

@@ -220,6 +220,18 @@ function parseJsonObject(value: unknown): Record<string, unknown> {
   return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
 }
 
+function toTemplateValue(value: unknown): string {
+  if (value == null) return '';
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => sanitizeText(entry, 120))
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  return sanitizeText(value, 255);
+}
+
 function addDays(date: Date, days: number) {
   const next = new Date(date);
   next.setDate(next.getDate() + Math.max(0, days));
@@ -409,6 +421,61 @@ function mapTaskRow(row: Record<string, unknown>): AppTask {
     createdAt: toIsoString(row.created_at),
     metadata: parseJsonObject(row.metadata),
   };
+}
+
+function buildSequenceTemplateVariables(row: Record<string, unknown>) {
+  const rawFirstName = toTemplateValue(row.first_name);
+  const lastName = toTemplateValue(row.last_name);
+  const fullName = `${rawFirstName} ${lastName}`.trim();
+  const firstName = rawFirstName || fullName || 'there';
+  const email = toTemplateValue(row.email);
+  const companyName = toTemplateValue(row.company_name);
+  const companyDomain = toTemplateValue(row.company_domain);
+  const title = toTemplateValue(row.title);
+  const department = toTemplateValue(row.department);
+  const city = toTemplateValue(row.city);
+  const state = toTemplateValue(row.state);
+  const country = toTemplateValue(row.country);
+  const stage = toTemplateValue(row.stage);
+  const phoneDirect = toTemplateValue(row.phone_direct);
+  const phoneMobile = toTemplateValue(row.phone_mobile);
+  const phoneHq = toTemplateValue(row.phone_hq);
+  const phone = phoneDirect || phoneMobile || phoneHq;
+  const linkedinUrl = toTemplateValue(row.linkedin_url);
+  const leadScore =
+    row.lead_score == null || row.lead_score === ''
+      ? ''
+      : String(toNumber(row.lead_score));
+  const tags = toTemplateValue(row.tags);
+
+  return {
+    first_name: firstName,
+    last_name: lastName,
+    full_name: fullName || firstName,
+    email,
+    company_name: companyName,
+    company_domain: companyDomain,
+    title,
+    department,
+    city,
+    state,
+    country,
+    stage,
+    phone,
+    phone_direct: phoneDirect,
+    phone_mobile: phoneMobile,
+    phone_hq: phoneHq,
+    linkedin_url: linkedinUrl,
+    lead_score: leadScore,
+    tags,
+  };
+}
+
+function renderSequenceTemplate(template: string, variables: Record<string, string>) {
+  return template.replace(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi, (match, token: string) => {
+    const key = token.toLowerCase();
+    return Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : match;
+  });
 }
 
 export async function ensureSequencesTables() {
@@ -1222,13 +1289,29 @@ export async function runDueSequenceSteps(
         s.steps,
         c.first_name,
         c.last_name,
-        c.email
+        c.email,
+        c.title,
+        c.department,
+        c.linkedin_url,
+        c.city,
+        c.state,
+        c.country,
+        c.stage,
+        c.phone_direct,
+        c.phone_mobile,
+        c.phone_hq,
+        c.lead_score,
+        c.tags,
+        comp.name AS company_name,
+        comp.domain AS company_domain
       FROM app_sequence_enrollments e
       INNER JOIN app_sequences s
         ON s.id = e.sequence_id
        AND s.org_id = e.org_id
       LEFT JOIN "Contact" c
         ON c.id = e.contact_id
+      LEFT JOIN "Company" comp
+        ON comp.id = c.company_id
       WHERE
         e.org_id = $1
         AND s.status = 'active'
@@ -1252,6 +1335,8 @@ export async function runDueSequenceSteps(
     const sequenceName = String(row.sequence_name || 'Sequence');
     const contactName = `${String(row.first_name || '').trim()} ${String(row.last_name || '').trim()}`.trim() || 'this contact';
     const contactEmail = row.email ? String(row.email) : null;
+    const templateVariables = buildSequenceTemplateVariables(row);
+    const renderedStepTitle = renderSequenceTemplate(step?.title || 'Step', templateVariables).trim() || step?.title || 'Step';
 
     summary.processedEnrollments += 1;
 
@@ -1280,13 +1365,21 @@ export async function runDueSequenceSteps(
           enrollmentId,
           contactId,
           eventType: 'email_skipped',
-          eventSummary: `Skipped "${step.title}" because the contact has no email address.`,
+          eventSummary: `Skipped "${renderedStepTitle}" because the contact has no email address.`,
         });
       } else {
+        const renderedSubject =
+          renderSequenceTemplate(step.subject || step.title, templateVariables).trim() ||
+          step.subject ||
+          step.title;
+        const renderedBody =
+          renderSequenceTemplate(step.body || step.title, templateVariables).trim() ||
+          step.body ||
+          step.title;
         const result = await sendSequenceEmail(
           contactEmail,
-          step.subject || step.title,
-          step.body || step.title
+          renderedSubject,
+          renderedBody
         );
 
         if (result.mode === 'sent') {
@@ -1301,10 +1394,10 @@ export async function runDueSequenceSteps(
           enrollmentId,
           contactId,
           eventType: result.mode === 'sent' ? 'email_sent' : 'email_simulated',
-          eventSummary: `${result.mode === 'sent' ? 'Sent' : 'Simulated'} "${step.title}" to ${contactName}.`,
+          eventSummary: `${result.mode === 'sent' ? 'Sent' : 'Simulated'} "${renderedStepTitle}" to ${contactName}.`,
           payload: {
             to: contactEmail,
-            subject: step.subject || step.title,
+            subject: renderedSubject,
             actorUserId,
           },
         });
@@ -1318,7 +1411,7 @@ export async function runDueSequenceSteps(
         sequenceName,
         steps,
         currentStepIndex,
-        currentStepTitle: step.title,
+        currentStepTitle: renderedStepTitle,
         now,
       });
       if (advance.completed) summary.completedEnrollments += 1;
@@ -1348,12 +1441,23 @@ export async function runDueSequenceSteps(
         sequenceId,
         enrollmentId,
         eventType: 'task_skipped',
-        eventSummary: `Skipped "${step.title}" because the enrollment is missing a contact.`,
+        eventSummary: `Skipped "${renderedStepTitle}" because the enrollment is missing a contact.`,
       });
       continue;
     }
 
     if (existingTaskRows.length === 0) {
+      const renderedTaskTitle =
+        renderSequenceTemplate(step.title || `Task for ${contactName}`, templateVariables).trim() ||
+        step.title ||
+        `Task for ${contactName}`;
+      const renderedSubject =
+        renderSequenceTemplate(step.subject || '', templateVariables).trim();
+      const renderedDescription =
+        renderSequenceTemplate(step.body || step.subject || step.title, templateVariables).trim() ||
+        step.body ||
+        step.subject ||
+        step.title;
       const taskTitle =
         step.type === 'manual_email'
           ? `Send manual email to ${contactName}`
@@ -1361,7 +1465,12 @@ export async function runDueSequenceSteps(
             ? `Call ${contactName}`
             : step.type === 'linkedin_task'
               ? `LinkedIn touch for ${contactName}`
-              : step.title || `Task for ${contactName}`;
+              : renderedTaskTitle;
+
+      const taskDescription =
+        step.type === 'manual_email' && renderedSubject
+          ? `Subject: ${renderedSubject}\n\n${renderedDescription}`
+          : renderedDescription;
 
       await createSequenceTask({
         orgId,
@@ -1369,7 +1478,7 @@ export async function runDueSequenceSteps(
         enrollmentId,
         contactId,
         title: taskTitle,
-        description: step.body || step.subject || step.title,
+        description: taskDescription,
         dueAt: now,
         metadata: {
           stepIndex: currentStepIndex,
@@ -1385,7 +1494,7 @@ export async function runDueSequenceSteps(
         enrollmentId,
         contactId,
         eventType: 'task_created',
-        eventSummary: `Created a ${step.type.replace('_', ' ')} task for ${contactName}.`,
+        eventSummary: `Created a ${step.type.replace('_', ' ')} task for ${contactName} from "${renderedStepTitle}".`,
         payload: { stepIndex: currentStepIndex, stepType: step.type },
       });
     }

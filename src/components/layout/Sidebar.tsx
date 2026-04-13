@@ -13,7 +13,7 @@ const mainNav: NavItem[] = [
   { label: 'Home', icon: 'H', href: '/' },
   { label: 'Prospecting', icon: 'P', href: '/prospect' },
   { label: 'Sequences', icon: 'S', href: '/sequences' },
-  { label: 'Plays', icon: 'Y', href: '/plays' },
+  { label: 'Workflows', icon: 'W', href: '/plays' },
 ];
 
 const manageNav: NavItem[] = [

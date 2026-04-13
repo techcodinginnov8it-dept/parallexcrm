@@ -1,10 +1,15 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import useSWR from 'swr';
 import {
+  Activity,
+  CalendarClock,
+  ChevronRight,
   CheckCircle2,
   Clock3,
+  Eye,
+  LayoutPanelTop,
   ListChecks,
   Mail,
   PauseCircle,
@@ -14,6 +19,8 @@ import {
   Save,
   Search,
   StopCircle,
+  Sparkles,
+  Settings2,
   Trash2,
   UserPlus,
   Users,
@@ -111,14 +118,35 @@ type SequenceDetailResponse = {
   data: SequenceDetail;
 };
 
+type SequenceRunSummary = {
+  processedEnrollments: number;
+  emailsSent: number;
+  emailsSimulated: number;
+  tasksCreated: number;
+  completedEnrollments: number;
+  skippedSteps: number;
+};
+
 type ContactOption = {
   id: string;
   first_name: string;
   last_name: string;
   email: string | null;
   stage: string | null;
+  title?: string | null;
+  department?: string | null;
+  city?: string | null;
+  state?: string | null;
+  country?: string | null;
+  phone_direct?: string | null;
+  phone_mobile?: string | null;
+  phone_hq?: string | null;
+  linkedin_url?: string | null;
+  lead_score?: number | null;
+  tags?: string[] | null;
   company?: {
     name?: string | null;
+    domain?: string | null;
   } | null;
 };
 
@@ -134,6 +162,15 @@ type SequenceDraft = {
   steps: SequenceStep[];
 };
 
+type SequenceViewTab = 'editor' | 'contacts' | 'activity' | 'settings' | 'logs';
+
+type SequenceTabDescriptor = {
+  value: SequenceViewTab;
+  label: string;
+  icon: ReactNode;
+  count?: number;
+};
+
 const TIMEZONE_OPTIONS = ['UTC', 'Eastern Time', 'Central Time', 'Pacific Time', 'London', 'Singapore'];
 const STEP_TYPES: Array<{ value: SequenceStepType; label: string }> = [
   { value: 'automatic_email', label: 'Automatic Email' },
@@ -141,6 +178,27 @@ const STEP_TYPES: Array<{ value: SequenceStepType; label: string }> = [
   { value: 'phone_call', label: 'Phone Call' },
   { value: 'task', label: 'Task' },
   { value: 'linkedin_task', label: 'LinkedIn Task' },
+];
+const CONTACT_VARIABLE_TOKENS = [
+  '{{first_name}}',
+  '{{last_name}}',
+  '{{full_name}}',
+  '{{email}}',
+  '{{company_name}}',
+  '{{company_domain}}',
+  '{{title}}',
+  '{{department}}',
+  '{{stage}}',
+  '{{city}}',
+  '{{state}}',
+  '{{country}}',
+  '{{phone}}',
+  '{{phone_direct}}',
+  '{{phone_mobile}}',
+  '{{phone_hq}}',
+  '{{linkedin_url}}',
+  '{{lead_score}}',
+  '{{tags}}',
 ];
 
 const fetcher = async <T,>(url: string): Promise<T> => {
@@ -181,6 +239,12 @@ function stepLabel(type: SequenceStepType) {
   return STEP_TYPES.find((option) => option.value === type)?.label || type;
 }
 
+function stepTypeIcon(type: SequenceStepType, size = 16) {
+  if (type === 'automatic_email' || type === 'manual_email') return <Mail size={size} />;
+  if (type === 'phone_call') return <PhoneCall size={size} />;
+  return <ListChecks size={size} />;
+}
+
 function formatDate(value: string | null) {
   if (!value) return 'Not scheduled';
   try {
@@ -214,7 +278,111 @@ function cloneDraft(sequence: SequenceDetail): SequenceDraft {
   };
 }
 
+function pluralize(count: number, singular: string, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function summarizeRunResult(summary?: Partial<SequenceRunSummary> | null) {
+  const processedEnrollments = summary?.processedEnrollments ?? 0;
+  const emailsSent = summary?.emailsSent ?? 0;
+  const emailsSimulated = summary?.emailsSimulated ?? 0;
+  const tasksCreated = summary?.tasksCreated ?? 0;
+  const completedEnrollments = summary?.completedEnrollments ?? 0;
+  const skippedSteps = summary?.skippedSteps ?? 0;
+
+  const outcome = [
+    emailsSent > 0 ? `sent ${pluralize(emailsSent, 'email')}` : null,
+    emailsSimulated > 0 ? `simulated ${pluralize(emailsSimulated, 'email')}` : null,
+    tasksCreated > 0 ? `created ${pluralize(tasksCreated, 'task')}` : null,
+    completedEnrollments > 0 ? `completed ${pluralize(completedEnrollments, 'enrollment')}` : null,
+    skippedSteps > 0 ? `skipped ${pluralize(skippedSteps, 'step')}` : null,
+  ].filter(Boolean);
+
+  if (outcome.length === 0) {
+    return `Checked due steps automatically. ${pluralize(processedEnrollments, 'enrollment')} were due, but no new actions were needed.`;
+  }
+
+  return `Checked due steps automatically. Processed ${pluralize(processedEnrollments, 'enrollment')} and ${outcome.join(', ')}.`;
+}
+
+function buildContactPreviewVariables(contact?: ContactOption | null) {
+  const firstName = contact?.first_name?.trim() || 'there';
+  const lastName = contact?.last_name?.trim() || '';
+  const fullName = `${firstName} ${lastName}`.trim();
+  const phone = contact?.phone_direct || contact?.phone_mobile || contact?.phone_hq || '';
+
+  return {
+    first_name: firstName,
+    last_name: lastName,
+    full_name: fullName || firstName,
+    email: contact?.email || '',
+    company_name: contact?.company?.name || '',
+    company_domain: contact?.company?.domain || '',
+    title: contact?.title || '',
+    department: contact?.department || '',
+    stage: contact?.stage || '',
+    city: contact?.city || '',
+    state: contact?.state || '',
+    country: contact?.country || '',
+    phone,
+    phone_direct: contact?.phone_direct || '',
+    phone_mobile: contact?.phone_mobile || '',
+    phone_hq: contact?.phone_hq || '',
+    linkedin_url: contact?.linkedin_url || '',
+    lead_score:
+      typeof contact?.lead_score === 'number' && Number.isFinite(contact.lead_score)
+        ? String(contact.lead_score)
+        : '',
+    tags: Array.isArray(contact?.tags) ? contact?.tags.filter(Boolean).join(', ') : '',
+  };
+}
+
+function renderPreviewTemplate(template: string, variables: Record<string, string>) {
+  return template.replace(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi, (match, token: string) => {
+    const key = token.toLowerCase();
+    return Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : match;
+  });
+}
+
+function formatDelayLabel(delayDays: number) {
+  if (delayDays <= 0) return 'Runs immediately';
+  if (delayDays === 1) return 'Runs in 1 day';
+  return `Runs in ${delayDays} days`;
+}
+
+function VariableHint() {
+  return (
+    <div
+      style={{
+        marginTop: '0.75rem',
+        fontSize: '0.76rem',
+        color: 'var(--text-muted)',
+        lineHeight: 1.6,
+      }}
+    >
+      Available variables:{' '}
+      {CONTACT_VARIABLE_TOKENS.map((token, index) => (
+        <span key={token}>
+          <code
+            style={{
+              fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)',
+              background: 'var(--primary-subtle)',
+              borderRadius: '999px',
+              padding: '0.1rem 0.45rem',
+              color: 'var(--primary-hover)',
+            }}
+          >
+            {token}
+          </code>
+          {index < CONTACT_VARIABLE_TOKENS.length - 1 ? ' ' : ''}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export default function SequencesClient() {
+  const [activeTab, setActiveTab] = useState<SequenceViewTab>('editor');
   const [page, setPage] = useState(1);
   const [limit, setLimit] = useState(12);
   const [search, setSearch] = useState('');
@@ -230,6 +398,8 @@ export default function SequencesClient() {
   const [isEnrolling, setIsEnrolling] = useState(false);
   const [actingEnrollmentId, setActingEnrollmentId] = useState<string | null>(null);
   const [isRunningDueSteps, setIsRunningDueSteps] = useState(false);
+  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+  const [previewContactId, setPreviewContactId] = useState<string | null>(null);
 
   const listQuery = useMemo(() => {
     const params = new URLSearchParams({
@@ -270,6 +440,20 @@ export default function SequencesClient() {
   const pagination = list.data?.meta || { total: 0, page: 1, limit: 12, totalPages: 1 };
   const selectedSequence = detail.data?.data || null;
   const contactOptions = contacts.data?.data || [];
+  const hasPersistedSequence = Boolean(!isCreating && selectedSequenceId);
+  const selectedStepIndex = Math.max(
+    0,
+    draft.steps.findIndex((step) => step.id === selectedStepId)
+  );
+  const selectedStep = draft.steps[selectedStepIndex] || draft.steps[0];
+  const previewContact = contactOptions.find((contact) => contact.id === previewContactId) || contactOptions[0] || null;
+  const previewVariables = buildContactPreviewVariables(previewContact);
+  const previewSubject = selectedStep
+    ? renderPreviewTemplate(selectedStep.subject || selectedStep.title, previewVariables)
+    : '';
+  const previewBody = selectedStep
+    ? renderPreviewTemplate(selectedStep.body || selectedStep.title, previewVariables)
+    : '';
 
   useEffect(() => {
     if (isCreating) return;
@@ -283,6 +467,31 @@ export default function SequencesClient() {
       setSelectedContactIds(new Set());
     }
   }, [isCreating, selectedSequence]);
+
+  useEffect(() => {
+    if (!draft.steps.length) {
+      setSelectedStepId(null);
+      return;
+    }
+
+    const stepStillExists = selectedStepId && draft.steps.some((step) => step.id === selectedStepId);
+    if (!stepStillExists) {
+      setSelectedStepId(draft.steps[0].id);
+    }
+  }, [draft.steps, selectedStepId]);
+
+  useEffect(() => {
+    if (!contactOptions.length) {
+      setPreviewContactId(null);
+      return;
+    }
+
+    const contactStillExists =
+      previewContactId && contactOptions.some((contact) => contact.id === previewContactId);
+    if (!contactStillExists) {
+      setPreviewContactId(contactOptions[0].id);
+    }
+  }, [contactOptions, previewContactId]);
 
   const applyStep = <K extends keyof SequenceStep>(stepId: string, key: K, value: SequenceStep[K]) => {
     setDraft((current) => ({
@@ -298,6 +507,35 @@ export default function SequencesClient() {
     setNotice('');
     setErrorMessage('');
     setSelectedContactIds(new Set());
+    setActiveTab('editor');
+    setSelectedStepId(null);
+    setPreviewContactId(null);
+  };
+
+  const addStep = () => {
+    const nextStep = createStep(draft.steps.length);
+    setDraft((current) => ({
+      ...current,
+      steps: [...current.steps, nextStep],
+    }));
+    setSelectedStepId(nextStep.id);
+  };
+
+  const removeStep = (stepId: string) => {
+    if (draft.steps.length === 1) return;
+
+    const currentIndex = draft.steps.findIndex((step) => step.id === stepId);
+    const fallbackStep =
+      draft.steps[currentIndex + 1] || draft.steps[currentIndex - 1] || draft.steps[0];
+
+    setDraft((current) => ({
+      ...current,
+      steps: current.steps.filter((entry) => entry.id !== stepId),
+    }));
+
+    if (selectedStepId === stepId) {
+      setSelectedStepId(fallbackStep?.id || null);
+    }
   };
 
   const saveSequence = async (nextStatus?: SequenceStatus) => {
@@ -306,8 +544,9 @@ export default function SequencesClient() {
     setErrorMessage('');
 
     try {
-      const response = await fetch(isCreating ? '/api/sequences' : `/api/sequences/${selectedSequenceId}`, {
-        method: isCreating ? 'POST' : 'PATCH',
+      const shouldCreate = isCreating || !selectedSequenceId;
+      const response = await fetch(shouldCreate ? '/api/sequences' : `/api/sequences/${selectedSequenceId}`, {
+        method: shouldCreate ? 'POST' : 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...draft,
@@ -318,6 +557,9 @@ export default function SequencesClient() {
       if (!response.ok) throw new Error(payload?.error || 'Failed to save sequence.');
 
       const saved = payload.data as SequenceDetail;
+      if (!saved?.id) {
+        throw new Error('The backend did not return a saved sequence id.');
+      }
       setIsCreating(false);
       setSelectedSequenceId(saved.id);
       setDraft(cloneDraft(saved));
@@ -347,14 +589,39 @@ export default function SequencesClient() {
       const payload = await response.json().catch(() => null);
       if (!response.ok) throw new Error(payload?.error || 'Failed to enroll contacts.');
 
+      const enrolledSequence = payload?.data as SequenceDetail | undefined;
+      const insertedCount = Number(payload?.insertedCount || 0);
+
       setSelectedContactIds(new Set());
-      setNotice(
-        payload?.insertedCount > 0
-          ? `Enrolled ${payload.insertedCount} contact${payload.insertedCount === 1 ? '' : 's'}.`
-          : 'Selected contacts were already enrolled.'
-      );
-      await list.mutate();
-      await detail.mutate({ data: payload.data as SequenceDetail }, false);
+
+      let nextNotice =
+        insertedCount > 0
+          ? `Enrolled ${pluralize(insertedCount, 'contact')}.`
+          : 'Selected contacts were already enrolled.';
+
+      if (insertedCount > 0 && enrolledSequence?.status === 'active') {
+        const runResponse = await fetch('/api/sequences/run-due', {
+          method: 'POST',
+        });
+        const runPayload = await runResponse.json().catch(() => null);
+
+        if (runResponse.ok) {
+          nextNotice = `${nextNotice} ${summarizeRunResult(runPayload?.data as SequenceRunSummary | undefined)}`;
+        } else {
+          nextNotice = `${nextNotice} Automatic due-step check could not finish: ${runPayload?.error || 'Unknown error.'}`;
+        }
+
+        await Promise.all([list.mutate(), detail.mutate()]);
+      } else {
+        if (insertedCount > 0 && enrolledSequence?.status !== 'active') {
+          nextNotice = `${nextNotice} The contact is saved in the sequence, but this sequence must be active before the first step can run.`;
+        }
+
+        await list.mutate();
+        await detail.mutate({ data: enrolledSequence as SequenceDetail }, false);
+      }
+
+      setNotice(nextNotice);
     } catch (error: any) {
       setErrorMessage(error?.message || 'Failed to enroll contacts.');
     } finally {
@@ -384,6 +651,11 @@ export default function SequencesClient() {
     } finally {
       setIsRunningDueSteps(false);
     }
+  };
+
+  const notifyInDev = (label: string) => {
+    setErrorMessage('');
+    setNotice(`${label} is still in development.`);
   };
 
   const updateEnrollment = async (
@@ -418,13 +690,23 @@ export default function SequencesClient() {
     }
   };
 
+  const sequenceDisplayName =
+    draft.name.trim() || (isCreating ? 'Untitled sequence' : selectedSequence?.name || 'Sequence Builder');
+  const tabs: SequenceTabDescriptor[] = [
+    { value: 'editor', label: 'Editor', icon: <LayoutPanelTop size={14} />, count: draft.steps.length },
+    { value: 'contacts', label: 'Contacts', icon: <Users size={14} />, count: selectedSequence?.enrollments.length || 0 },
+    { value: 'activity', label: 'Activity', icon: <Activity size={14} />, count: selectedSequence?.recentEvents.length || 0 },
+    { value: 'logs', label: 'Logs', icon: <ListChecks size={14} />, count: sequences.length },
+    { value: 'settings', label: 'Settings', icon: <Settings2 size={14} /> },
+  ];
+
   return (
-    <div className="page-container" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-      <div className="page-header" style={{ marginBottom: 0, alignItems: 'flex-start' }}>
+    <div className="page-container sequence-studio-page" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+      <div className="page-header" style={{ marginBottom: 0, alignItems: 'flex-start', gap: '1rem' }}>
         <div>
           <h1 className="page-title">Sequences</h1>
           <p className="page-subtitle">
-            Build Apollo-style outreach cadences with steps, schedules, and contact enrollment.
+            Build branded outreach cadences with previewable messaging, sequencing logic, and clear enrollment control.
           </p>
         </div>
         <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
@@ -434,6 +716,51 @@ export default function SequencesClient() {
           <button className="btn btn-primary" onClick={resetComposer}>
             <Plus size={16} /> New Sequence
           </button>
+        </div>
+      </div>
+
+      <div className="sequence-studio-hero">
+        <div>
+          <div className="sequence-studio-hero-label">
+            <Sparkles size={14} />
+            Parallex Sequences Studio
+          </div>
+          <h2 className="sequence-studio-hero-title">{sequenceDisplayName}</h2>
+          <p className="sequence-studio-hero-copy">
+            {isCreating
+              ? 'Shape a polished, multi-step sequence that feels guided from the first touch to the final follow-up.'
+              : `${selectedSequence?.metrics.enrolledCount ?? 0} enrolled contacts across ${draft.steps.length} steps. Refine copy, preview personalization, and keep every next action visible.`}
+          </p>
+        </div>
+        <div className="sequence-studio-hero-actions">
+          <div className="sequence-feed-card">
+            <div className="sequence-feed-header">
+              <Workflow size={14} />
+              Status
+            </div>
+            <div className="sequence-feed-title" style={{ textTransform: 'capitalize' }}>
+              {draft.status}
+            </div>
+            <div className="sequence-feed-copy">{draft.settings.scheduleName || 'Add a schedule label.'}</div>
+          </div>
+          <div className="sequence-feed-card">
+            <div className="sequence-feed-header">
+              <Users size={14} />
+              Enrolled
+            </div>
+            <div className="sequence-feed-title">{selectedSequence?.metrics.enrolledCount ?? 0}</div>
+            <div className="sequence-feed-copy">{selectedSequence?.metrics.activeCount ?? 0} currently active</div>
+          </div>
+          <div className="sequence-feed-card">
+            <div className="sequence-feed-header">
+              <CalendarClock size={14} />
+              Delivery Window
+            </div>
+            <div className="sequence-feed-title">{draft.settings.timezone}</div>
+            <div className="sequence-feed-copy">
+              {draft.settings.useLocalTimezone ? 'Uses contact local time when available.' : 'Runs in the sequence timezone.'}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -514,6 +841,7 @@ export default function SequencesClient() {
                       setSelectedSequenceId(sequence.id);
                       setNotice('');
                       setErrorMessage('');
+                      setActiveTab('editor');
                     }}
                     style={{
                       textAlign: 'left',
@@ -561,26 +889,35 @@ export default function SequencesClient() {
         </div>
 
         <div style={{ flex: '999 1 760px', minWidth: '320px', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          <div className="card">
-            <div className="card-header">
+          <div className="sequence-command-card">
+            <div className="sequence-command-header">
               <div>
-                <div className="card-title">{isCreating ? 'Create Sequence' : selectedSequence?.name || 'Sequence Builder'}</div>
-                <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: '0.25rem' }}>
-                  Configure the sequence, step timing, and schedule.
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span className={sequenceBadge(draft.status)}>{draft.status}</span>
+                  <span className="badge badge-neutral">{draft.steps.length} steps</span>
+                  {hasPersistedSequence && (
+                    <span className="badge badge-info">{selectedSequence?.metrics.enrolledCount ?? 0} enrolled</span>
+                  )}
+                </div>
+                <div className="card-title" style={{ fontSize: '1.1rem', marginTop: '0.75rem' }}>
+                  {sequenceDisplayName}
+                </div>
+                <div className="sequence-command-summary">
+                  {draft.description.trim() || 'Give the team a short description for the playbook, audience, or goal.'}
                 </div>
               </div>
-              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                {!isCreating && draft.status !== 'active' && (
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'flex-end' }}>
+                {hasPersistedSequence && draft.status !== 'active' && (
                   <button className="btn btn-secondary btn-sm" onClick={() => saveSequence('active')} disabled={isSaving}>
                     <PlayCircle size={14} /> Activate
                   </button>
                 )}
-                {!isCreating && draft.status === 'active' && (
+                {hasPersistedSequence && draft.status === 'active' && (
                   <button className="btn btn-secondary btn-sm" onClick={() => saveSequence('paused')} disabled={isSaving}>
                     <PauseCircle size={14} /> Pause
                   </button>
                 )}
-                {!isCreating && draft.status !== 'archived' && (
+                {hasPersistedSequence && draft.status !== 'archived' && (
                   <button className="btn btn-secondary btn-sm" onClick={() => saveSequence('archived')} disabled={isSaving}>
                     <StopCircle size={14} /> Archive
                   </button>
@@ -590,119 +927,278 @@ export default function SequencesClient() {
                 </button>
               </div>
             </div>
-            <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label">Sequence Name</label>
-                  <input className="form-input" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
-                </div>
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label">Status</label>
-                  <select className="form-input" value={draft.status} onChange={(event) => setDraft((current) => ({ ...current, status: event.target.value as SequenceStatus }))}>
-                    <option value="draft">Draft</option>
-                    <option value="active">Active</option>
-                    <option value="paused">Paused</option>
-                    <option value="archived">Archived</option>
-                  </select>
-                </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">Sequence Name</label>
+                <input
+                  className="form-input"
+                  value={draft.name}
+                  onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+                />
               </div>
               <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">Status</label>
+                <select
+                  className="form-input"
+                  value={draft.status}
+                  onChange={(event) => setDraft((current) => ({ ...current, status: event.target.value as SequenceStatus }))}
+                >
+                  <option value="draft">Draft</option>
+                  <option value="active">Active</option>
+                  <option value="paused">Paused</option>
+                  <option value="archived">Archived</option>
+                </select>
+              </div>
+              <div className="form-group" style={{ marginBottom: 0, gridColumn: '1 / -1' }}>
                 <label className="form-label">Description</label>
-                <textarea className="form-input" value={draft.description} onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))} />
+                <textarea
+                  className="form-input"
+                  value={draft.description}
+                  onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))}
+                />
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label">Schedule Label</label>
-                  <input className="form-input" value={draft.settings.scheduleName} onChange={(event) => setDraft((current) => ({ ...current, settings: { ...current.settings, scheduleName: event.target.value } }))} />
-                </div>
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label">Timezone</label>
-                  <select className="form-input" value={draft.settings.timezone} onChange={(event) => setDraft((current) => ({ ...current, settings: { ...current.settings, timezone: event.target.value } }))}>
-                    {TIMEZONE_OPTIONS.map((timezone) => (
-                      <option key={timezone} value={timezone}>{timezone}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.65rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                <input type="checkbox" checked={draft.settings.useLocalTimezone} onChange={(event) => setDraft((current) => ({ ...current, settings: { ...current.settings, useLocalTimezone: event.target.checked } }))} />
-                Use contact local timezone when available.
-              </label>
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-header">
-              <div className="card-title">Steps</div>
+          <div className="sequence-section-tabs">
+            {tabs.map((tab) => (
               <button
-                className="btn btn-secondary btn-sm"
-                onClick={() => setDraft((current) => ({ ...current, steps: [...current.steps, createStep(current.steps.length)] }))}
+                key={tab.value}
+                type="button"
+                className={`sequence-section-tab ${activeTab === tab.value ? 'active' : ''}`}
+                onClick={() => setActiveTab(tab.value)}
               >
-                <Plus size={14} /> Add Step
+                {tab.icon}
+                <span>{tab.label}</span>
+                {typeof tab.count === 'number' && <span className="sequence-section-tab-count">{tab.count}</span>}
               </button>
-            </div>
-            <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.9rem' }}>
-              {draft.steps.map((step, index) => (
-                <div key={step.id} style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: '1rem', background: 'var(--bg-elevated)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'flex-start', marginBottom: '0.9rem' }}>
-                    <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-                      <div style={{ width: '34px', height: '34px', borderRadius: 'var(--radius-md)', background: 'var(--primary-subtle)', color: 'var(--primary-hover)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        {step.type === 'automatic_email' || step.type === 'manual_email' ? <Mail size={16} /> : step.type === 'phone_call' ? <PhoneCall size={16} /> : <ListChecks size={16} />}
-                      </div>
-                      <div>
-                        <div style={{ fontWeight: 600 }}>Step {index + 1}</div>
-                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{stepLabel(step.type)}</div>
-                      </div>
-                    </div>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      disabled={draft.steps.length === 1}
-                      onClick={() => setDraft((current) => ({ ...current, steps: current.steps.filter((entry) => entry.id !== step.id) }))}
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem' }}>
-                    <div className="form-group" style={{ marginBottom: 0 }}>
-                      <label className="form-label">Type</label>
-                      <select className="form-input" value={step.type} onChange={(event) => applyStep(step.id, 'type', event.target.value as SequenceStepType)}>
-                        {STEP_TYPES.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="form-group" style={{ marginBottom: 0 }}>
-                      <label className="form-label">Title</label>
-                      <input className="form-input" value={step.title} onChange={(event) => applyStep(step.id, 'title', event.target.value)} />
-                    </div>
-                    <div className="form-group" style={{ marginBottom: 0 }}>
-                      <label className="form-label">Delay Days</label>
-                      <input className="form-input" type="number" min={0} max={30} value={step.delayDays} onChange={(event) => applyStep(step.id, 'delayDays', Math.max(0, Math.min(30, Number(event.target.value) || 0)))} />
-                    </div>
-                  </div>
-                  {(step.type === 'automatic_email' || step.type === 'manual_email') && (
-                    <>
-                      <div className="form-group" style={{ marginTop: '1rem', marginBottom: 0 }}>
-                        <label className="form-label">Subject</label>
-                        <input className="form-input" value={step.subject} onChange={(event) => applyStep(step.id, 'subject', event.target.value)} />
-                      </div>
-                      <div className="form-group" style={{ marginTop: '1rem', marginBottom: 0 }}>
-                        <label className="form-label">Body</label>
-                        <textarea className="form-input" value={step.body} onChange={(event) => applyStep(step.id, 'body', event.target.value)} />
-                      </div>
-                    </>
-                  )}
-                  {(step.type === 'task' || step.type === 'linkedin_task' || step.type === 'phone_call') && (
-                    <div className="form-group" style={{ marginTop: '1rem', marginBottom: 0 }}>
-                      <label className="form-label">Instructions</label>
-                      <textarea className="form-input" value={step.body} onChange={(event) => applyStep(step.id, 'body', event.target.value)} />
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
+            ))}
           </div>
 
+          {activeTab === 'editor' && (
+            <div className="card">
+              <div className="card-header">
+                <div className="card-title">Sequence steps</div>
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <button className="btn btn-secondary btn-sm" onClick={() => notifyInDev('Collapse steps')}>
+                    Collapse steps
+                  </button>
+                  <button className="btn btn-primary btn-sm" onClick={() => saveSequence()} disabled={isSaving}>
+                    <Save size={14} /> {isSaving ? 'Saving...' : 'Save changes'}
+                  </button>
+                </div>
+              </div>
+              <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                <div className="sequence-step-rail">
+                  {draft.steps.map((step, index) => {
+                    const active = selectedStep?.id === step.id;
+                    return (
+                      <button
+                        key={step.id}
+                        type="button"
+                        className={`sequence-step-pill ${active ? 'active' : ''}`}
+                        onClick={() => setSelectedStepId(step.id)}
+                      >
+                        <div className="sequence-step-pill-head">
+                          <span className="sequence-step-pill-index">Step {index + 1}</span>
+                          <span className="sequence-step-pill-type">{stepLabel(step.type)}</span>
+                        </div>
+                        <div className="sequence-step-pill-title">
+                          <span>{stepTypeIcon(step.type, 14)}</span>
+                          <span>{step.title || `Step ${index + 1}`}</span>
+                        </div>
+                        <div className="sequence-step-pill-meta">{formatDelayLabel(step.delayDays)}</div>
+                      </button>
+                    );
+                  })}
+                  <button type="button" className="sequence-step-pill sequence-step-pill-add" onClick={addStep}>
+                    <Plus size={16} />
+                    <span>Add step</span>
+                  </button>
+                </div>
+
+                {selectedStep && (
+                  <div className="sequence-editor-grid">
+                    <div className="sequence-editor-main">
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start' }}>
+                        <div>
+                          <div className="card-title" style={{ fontSize: '1rem' }}>
+                            Step {selectedStepIndex + 1}: {stepLabel(selectedStep.type)}
+                          </div>
+                          <div className="sequence-preview-note">{formatDelayLabel(selectedStep.delayDays)}</div>
+                        </div>
+                        <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                          <button className="btn btn-secondary btn-sm" onClick={() => notifyInDev('Template')}>
+                            Template
+                          </button>
+                          <button className="btn btn-secondary btn-sm" onClick={() => notifyInDev('Prompt')}>
+                            Prompt
+                          </button>
+                          <button className="btn btn-secondary btn-sm" onClick={() => notifyInDev('Check email')}>
+                            Check email
+                          </button>
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            disabled={draft.steps.length === 1}
+                            onClick={() => removeStep(selectedStep.id)}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem' }}>
+                        <div className="form-group" style={{ marginBottom: 0 }}>
+                          <label className="form-label">Type</label>
+                          <select
+                            className="form-input"
+                            value={selectedStep.type}
+                            onChange={(event) => applyStep(selectedStep.id, 'type', event.target.value as SequenceStepType)}
+                          >
+                            {STEP_TYPES.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="form-group" style={{ marginBottom: 0 }}>
+                          <label className="form-label">Title</label>
+                          <input
+                            className="form-input"
+                            value={selectedStep.title}
+                            onChange={(event) => applyStep(selectedStep.id, 'title', event.target.value)}
+                          />
+                        </div>
+                        <div className="form-group" style={{ marginBottom: 0 }}>
+                          <label className="form-label">Delay Days</label>
+                          <input
+                            className="form-input"
+                            type="number"
+                            min={0}
+                            max={30}
+                            value={selectedStep.delayDays}
+                            onChange={(event) =>
+                              applyStep(
+                                selectedStep.id,
+                                'delayDays',
+                                Math.max(0, Math.min(30, Number(event.target.value) || 0))
+                              )
+                            }
+                          />
+                        </div>
+                      </div>
+
+                      {(selectedStep.type === 'automatic_email' || selectedStep.type === 'manual_email') && (
+                        <>
+                          <div className="form-group" style={{ marginBottom: 0 }}>
+                            <label className="form-label">Subject</label>
+                            <input
+                              className="form-input"
+                              value={selectedStep.subject}
+                              onChange={(event) => applyStep(selectedStep.id, 'subject', event.target.value)}
+                            />
+                          </div>
+                          <div className="form-group" style={{ marginBottom: 0 }}>
+                            <label className="form-label">Body</label>
+                            <textarea
+                              className="form-input sequence-editor-textarea"
+                              value={selectedStep.body}
+                              onChange={(event) => applyStep(selectedStep.id, 'body', event.target.value)}
+                            />
+                          </div>
+                          <VariableHint />
+                        </>
+                      )}
+
+                      {(selectedStep.type === 'task' ||
+                        selectedStep.type === 'linkedin_task' ||
+                        selectedStep.type === 'phone_call') && (
+                        <>
+                          <div className="form-group" style={{ marginBottom: 0 }}>
+                            <label className="form-label">Instructions</label>
+                            <textarea
+                              className="form-input sequence-editor-textarea"
+                              value={selectedStep.body}
+                              onChange={(event) => applyStep(selectedStep.id, 'body', event.target.value)}
+                            />
+                          </div>
+                          <VariableHint />
+                        </>
+                      )}
+                    </div>
+
+                    <aside className="sequence-editor-preview">
+                      <div className="sequence-preview-meta">
+                        <div>
+                          <div className="card-title" style={{ fontSize: '1rem' }}>
+                            Generate preview for contact
+                          </div>
+                          <div className="sequence-preview-note">
+                            Select a contact to see the personalized subject and body.
+                          </div>
+                        </div>
+                        <button className="btn btn-ghost btn-sm" onClick={() => notifyInDev('Refresh preview')}>
+                          Refresh
+                        </button>
+                      </div>
+
+                      {contactOptions.length > 0 ? (
+                        <>
+                          <div className="form-group" style={{ marginBottom: 0 }}>
+                            <label className="form-label">Select contact</label>
+                            <select
+                              className="form-input"
+                              value={previewContactId || ''}
+                              onChange={(event) => setPreviewContactId(event.target.value)}
+                            >
+                              {contactOptions.map((contact) => (
+                                <option key={contact.id} value={contact.id}>
+                                  {contact.first_name} {contact.last_name}
+                                  {contact.company?.name ? ` - ${contact.company.name}` : ''}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div className="sequence-preview-card">
+                            <div className="sequence-preview-label">To</div>
+                            <div>
+                              {(previewContact?.first_name || '').trim()} {(previewContact?.last_name || '').trim()}
+                              {previewContact?.email ? ` <${previewContact.email}>` : ' <no-email>'}
+                            </div>
+
+                            {(selectedStep.type === 'automatic_email' || selectedStep.type === 'manual_email') && (
+                              <>
+                                <div className="sequence-preview-label">Subject</div>
+                                <div>{previewSubject || 'No subject yet.'}</div>
+                              </>
+                            )}
+
+                            <div className="sequence-preview-label">
+                              {selectedStep.type === 'automatic_email' || selectedStep.type === 'manual_email'
+                                ? 'Body'
+                                : 'Instructions'}
+                            </div>
+                            <div className="sequence-preview-body">{previewBody || 'Add content to preview this step.'}</div>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="sequence-preview-card">
+                          <div className="sequence-empty-copy">
+                            Add or search contacts to preview placeholder values against real records.
+                          </div>
+                        </div>
+                      )}
+                    </aside>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'contacts' && (
+          <>
           <div className="card">
             <div className="card-header">
               <div className="card-title">Enroll Contacts</div>
@@ -815,7 +1311,10 @@ export default function SequencesClient() {
               )}
             </div>
           </div>
+          </>
+          )}
 
+          {activeTab === 'activity' && (
           <div className="card">
             <div className="card-header">
               <div className="card-title">Recent Activity</div>
@@ -846,6 +1345,113 @@ export default function SequencesClient() {
               )}
             </div>
           </div>
+          )}
+
+          {activeTab === 'logs' && (
+            <div className="card">
+              <div className="card-header">
+                <div className="card-title">Sequence Creation Log</div>
+              </div>
+              <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                {list.isLoading ? (
+                  <div style={{ color: 'var(--text-secondary)' }}>Loading creation logs...</div>
+                ) : sequences.length === 0 ? (
+                  <div style={{ color: 'var(--text-secondary)' }}>No sequences have been created yet.</div>
+                ) : (
+                  sequences.map((sequence) => (
+                    <div
+                      key={sequence.id}
+                      style={{
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-md)',
+                        background: 'var(--bg-elevated)',
+                        padding: '0.9rem 1rem',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        gap: '1rem',
+                        flexWrap: 'wrap',
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 600 }}>{sequence.name || 'Untitled sequence'}</div>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: '0.2rem' }}>
+                          {sequence.description || 'No description.'}
+                        </div>
+                        <div style={{ color: 'var(--text-muted)', fontSize: '0.76rem', marginTop: '0.4rem' }}>
+                          Created {formatDate(sequence.createdAt)} • {sequence.steps.length} steps
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span className={sequenceBadge(sequence.status)}>{sequence.status}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'settings' && (
+            <div className="card">
+              <div className="card-header">
+                <div>
+                  <div className="card-title">Scheduling and Delivery</div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '0.25rem' }}>
+                    Configure how the sequence stores timing preferences for enrolled contacts.
+                  </div>
+                </div>
+              </div>
+              <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label className="form-label">Schedule Label</label>
+                    <input
+                      className="form-input"
+                      value={draft.settings.scheduleName}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          settings: { ...current.settings, scheduleName: event.target.value },
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label className="form-label">Timezone</label>
+                    <select
+                      className="form-input"
+                      value={draft.settings.timezone}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          settings: { ...current.settings, timezone: event.target.value },
+                        }))
+                      }
+                    >
+                      {TIMEZONE_OPTIONS.map((timezone) => (
+                        <option key={timezone} value={timezone}>
+                          {timezone}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.65rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                  <input
+                    type="checkbox"
+                    checked={draft.settings.useLocalTimezone}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        settings: { ...current.settings, useLocalTimezone: event.target.checked },
+                      }))
+                    }
+                  />
+                  Use contact local timezone when available.
+                </label>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -9,6 +9,7 @@
 # next.js
 /.next/
 /out/
+/.next-stale-*/
 
 # production
 /build
@@ -26,6 +27,7 @@ yarn-error.log*
 .env
 .env*.local
 .devserver.log
+/.codex-temp/
 
 # vercel
 .vercel

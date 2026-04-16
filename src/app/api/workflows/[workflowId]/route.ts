@@ -87,6 +87,9 @@ function serializeWorkflow(workflow: any, steps: Array<{ type: string; config: R
     webhookPath: String(workflow.triggerConfig.path || ''),
     intervalMinutes: Number(workflow.triggerConfig.interval_minutes || 60),
     nextRunAt: workflow.triggerConfig.next_run_at || null,
+    targetEntity: workflow.triggerConfig.target_entity || 'people',
+    intervalType: workflow.triggerConfig.interval_type || 'recurring',
+    intervalDays: Array.isArray(workflow.triggerConfig.interval_days) ? workflow.triggerConfig.interval_days : [1, 2, 3, 4, 5],
     delayDays: sharedDelay?.days || 0,
     delays,
     flowOrder,
@@ -123,7 +126,10 @@ export async function PATCH(request: Request, context: { params: Promise<{ workf
       payload.webhookPath !== undefined ||
       payload.intervalMinutes !== undefined ||
       payload.nextRunAt !== undefined ||
-      payload.status !== undefined;
+      payload.status !== undefined ||
+      payload.targetEntity !== undefined ||
+      payload.intervalType !== undefined ||
+      payload.intervalDays !== undefined;
 
     if (hasTrigger) {
       const triggerType = payload.triggerType === 'webhook' || payload.triggerType === 'schedule' ? payload.triggerType : 'event';
@@ -137,6 +143,9 @@ export async function PATCH(request: Request, context: { params: Promise<{ workf
                 interval_minutes: Number(payload.intervalMinutes || 60),
                 next_run_at: payload.nextRunAt || new Date().toISOString(),
                 status: payload.status || 'draft',
+                target_entity: payload.targetEntity || 'people',
+                interval_type: payload.intervalType || 'recurring',
+                interval_days: Array.isArray(payload.intervalDays) ? payload.intervalDays : [],
               };
       nextPayload.is_active = payload.status === 'active' || payload.isActive === true;
     } else if (payload.isActive !== undefined) {

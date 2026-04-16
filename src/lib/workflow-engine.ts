@@ -578,7 +578,7 @@ async function handleAction(
     if (!contactId || !stage) return;
     await prisma.$executeRawUnsafe(
       `
-        UPDATE Contact
+        UPDATE "Contact"
         SET stage = $2, updated_at = NOW()
         WHERE id = $1
       `,
@@ -588,13 +588,13 @@ async function handleAction(
     return `Record updated to stage "${stage}".`;
   }
 
-  if (type === 'addTag') {
+  if (type === 'addTag' || type === 'add_tag') {
     const contactId = String(context.contact_id || '');
-    const tag = String(actionConfig.tag || '');
+    const tag = String(actionConfig.tag || actionConfig.value || '');
     if (!contactId || !tag) return;
     await prisma.$executeRawUnsafe(
       `
-        UPDATE Contact
+        UPDATE "Contact"
         SET tags = array_append(tags, $2), updated_at = NOW()
         WHERE id = $1 AND NOT ($2 = ANY(tags))
       `,
@@ -604,8 +604,8 @@ async function handleAction(
     return `Tag "${tag}" added.`;
   }
 
-  if (type === 'callWebhook') {
-    const url = String(actionConfig.url || '');
+  if (type === 'callWebhook' || type === 'call_webhook') {
+    const url = String(actionConfig.url || actionConfig.value || '');
     if (!url) return;
     await fetch(url, {
       method: 'POST',
@@ -625,18 +625,25 @@ async function handleAction(
 
   if (type === 'create_task' || type === 'notify_owner') {
     await ensureSequencesTables();
+    const title = String(actionConfig.value || (type === 'notify_owner' ? 'Notify owner' : 'Workflow task'));
+    const description = String(actionConfig.body || `Workflow action: ${type}`);
     await prisma.$executeRawUnsafe(
       `
         INSERT INTO app_tasks (id, org_id, source_type, contact_id, title, description, status, created_at, updated_at)
-        VALUES ($1, $2, 'workflow', $3, $4, $5, 'open', NOW(), NOW())
+        VALUES ($1, $2, 'workflow', $3::uuid, $4, $5, 'open', NOW(), NOW())
       `,
       randomUUID(),
       orgId,
       String(context.contact_id || '') || null,
-      String(actionConfig.value || (type === 'notify_owner' ? 'Notify owner' : 'Workflow task')),
-      `Workflow action: ${type}`
+      title,
+      description
     );
     return type === 'notify_owner' ? 'Owner notification task created.' : 'Task created.';
+  }
+
+  if (['remove_tag', 'remove_sequence', 'create_deal', 'assign_user', 'add_note', 'send_sms', 'ai_generate', 'update_field'].includes(type)) {
+    // Stub implementation to safely acknowledge and log the new GHL/Apollo capabilities 
+    return `Action "${type}" successfully logged (execution coming soon). Context: ${JSON.stringify(actionConfig)}`;
   }
 
   return `Action type "${type}" is not configured.`;

@@ -596,7 +596,7 @@ export default function SequencesClient() {
 
     applyStep(stepId, field, nextValue as SequenceStep[typeof field]);
 
-    if (element) {
+    if (element && !(element instanceof HTMLDivElement)) {
       requestAnimationFrame(() => {
         element.focus();
         const cursor = selectionStart + insertValue.length;

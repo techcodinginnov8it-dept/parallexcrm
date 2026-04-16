@@ -1,9 +1,10 @@
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
+import { env } from '../env';
 
 function isSupabaseConfigured(): boolean {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+  const url = env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const key = env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
   return (url.startsWith('http://') || url.startsWith('https://')) && key !== 'your-supabase-anon-key' && key.length > 0;
 }
 
@@ -34,8 +35,8 @@ export async function createClient() {
   const cookieStore = await cookies();
 
   return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    env.NEXT_PUBLIC_SUPABASE_URL,
+    env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     {
       cookies: {
         getAll() {
@@ -66,8 +67,8 @@ export async function createServiceClient() {
 
   const { createClient: createSupabaseClient } = await import('@supabase/supabase-js');
   return createSupabaseClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    env.NEXT_PUBLIC_SUPABASE_URL,
+    env.SUPABASE_SERVICE_ROLE_KEY,
     { auth: { autoRefreshToken: false, persistSession: false } }
   );
 }

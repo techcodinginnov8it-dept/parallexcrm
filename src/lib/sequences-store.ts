@@ -238,6 +238,49 @@ function addDays(date: Date, days: number) {
   return next;
 }
 
+function isWithinScheduleWindow(settings: SequenceSettings, now: Date = new Date()): boolean {
+  const name = (settings.scheduleName || '').toLowerCase();
+  
+  if (name.includes('any time') || name.includes('24/7')) {
+    return true;
+  }
+
+  // Get current hour and day based on timezone (if supported) or fallback to UTC/local
+  let hour = now.getUTCHours();
+  let day = now.getUTCDay(); // 0 is Sunday, 6 is Saturday
+  
+  try {
+    const timeZone = settings.useLocalTimezone ? Intl.DateTimeFormat().resolvedOptions().timeZone : (settings.timezone || 'UTC');
+    const formatterHour = new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', hourCycle: 'h23' });
+    const formatterDay = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' });
+    
+    hour = parseInt(formatterHour.format(now), 10);
+    const dayStr = formatterDay.format(now).toLowerCase();
+    const daysMap: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+    if (dayStr in daysMap) {
+      day = daysMap[dayStr];
+    }
+  } catch {
+    // Ignore timezone parse errors, use UTC defaults computed above
+  }
+
+  const isWeekend = day === 0 || day === 6;
+
+  // Weekdays only
+  if (isWeekend) return false;
+
+  // Window logic: Morning vs Afternoon vs standard 9-5
+  if (name.includes('morning')) {
+    return hour >= 8 && hour < 12; // 8am to 12pm
+  }
+  if (name.includes('afternoon')) {
+    return hour >= 12 && hour < 17; // 12pm to 5pm
+  }
+  
+  // Default general "Weekdays" business hours
+  return hour >= 8 && hour < 18; // 8am to 6pm schedule
+}
+
 function canSendSequenceEmail() {
   const host = process.env.SMTP_HOST?.trim();
   const user = process.env.SMTP_USER?.trim();
@@ -1286,6 +1329,7 @@ export async function runDueSequenceSteps(
       SELECT
         e.*,
         s.name AS sequence_name,
+        s.settings,
         s.steps,
         c.first_name,
         c.last_name,
@@ -1326,6 +1370,12 @@ export async function runDueSequenceSteps(
 
   for (const row of dueRows) {
     const now = new Date();
+    const settings = normalizeSettings(row.settings);
+    
+    if (!isWithinScheduleWindow(settings, now)) {
+      continue; // Skip processing this enrollment until we are within the schedule window
+    }
+
     const steps = normalizeSteps(row.steps);
     const currentStepIndex = toNumber(row.current_step_index);
     const step = steps[currentStepIndex];

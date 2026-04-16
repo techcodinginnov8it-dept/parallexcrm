@@ -111,44 +111,44 @@ async function resolveInitialUserRole(organizationId: string): Promise<Role> {
 }
 
 export async function getCurrentUser() {
-  const supabase = await createClient();
-  const authUser = await resolveAuthUser(supabase);
-  const authUserId = authUser?.id?.trim();
-  const authEmail = authUser?.email?.trim().toLowerCase();
+  try {
+    const supabase = await createClient();
+    const authUser = await resolveAuthUser(supabase);
+    const authUserId = authUser?.id?.trim();
+    const authEmail = authUser?.email?.trim().toLowerCase();
 
-  if (!authUserId || !authEmail) return null;
+    if (!authUserId || !authEmail) return null;
 
-  if (isUuid(authUserId)) {
-    const byId = await prisma.user.findUnique({
-      where: { id: authUserId },
+    if (isUuid(authUserId)) {
+      const byId = await prisma.user.findUnique({
+        where: { id: authUserId },
+        include: USER_INCLUDE,
+      });
+      if (byId) return byId;
+    }
+
+    const byEmail = await prisma.user.findUnique({
+      where: { email: authEmail },
       include: USER_INCLUDE,
     });
-    if (byId) return byId;
-  }
+    if (byEmail) return byEmail;
 
-  const byEmail = await prisma.user.findUnique({
-    where: { email: authEmail },
-    include: USER_INCLUDE,
-  });
-  if (byEmail) return byEmail;
+    const userMetadata = (authUser?.user_metadata || {}) as Record<string, unknown>;
+    const rawFirstName = String(userMetadata.first_name || '').trim();
+    const rawLastName = String(userMetadata.last_name || '').trim();
+    const rawOrgName = String(userMetadata.org_name || '').trim();
 
-  const userMetadata = (authUser?.user_metadata || {}) as Record<string, unknown>;
-  const rawFirstName = String(userMetadata.first_name || '').trim();
-  const rawLastName = String(userMetadata.last_name || '').trim();
-  const rawOrgName = String(userMetadata.org_name || '').trim();
+    const [emailLocal = 'user', emailDomain = 'workspace.local'] = authEmail.split('@');
+    const firstName = sanitizeName(rawFirstName, emailLocal.slice(0, 100) || 'User');
+    const lastName = sanitizeName(rawLastName, 'User');
+    const orgName = sanitizeOrgName(rawOrgName || `${firstName}'s Workspace`);
 
-  const [emailLocal = 'user', emailDomain = 'workspace.local'] = authEmail.split('@');
-  const firstName = sanitizeName(rawFirstName, emailLocal.slice(0, 100) || 'User');
-  const lastName = sanitizeName(rawLastName, 'User');
-  const orgName = sanitizeOrgName(rawOrgName || `${firstName}'s Workspace`);
+    const slugBase = slugify(rawOrgName || emailLocal || 'workspace') || `workspace-${authUserId.slice(0, 8)}`;
+    const preferredDomain =
+      emailDomain && !PUBLIC_EMAIL_DOMAINS.has(emailDomain)
+        ? emailDomain
+        : `${slugBase}.local`;
 
-  const slugBase = slugify(rawOrgName || emailLocal || 'workspace') || `workspace-${authUserId.slice(0, 8)}`;
-  const preferredDomain =
-    emailDomain && !PUBLIC_EMAIL_DOMAINS.has(emailDomain)
-      ? emailDomain
-      : `${slugBase}.local`;
-
-  try {
     const organizationId = await getOrCreateOrganizationId(preferredDomain, orgName);
     if (!organizationId) return null;
     const role = await resolveInitialUserRole(organizationId);
@@ -169,11 +169,20 @@ export async function getCurrentUser() {
     return created;
   } catch (error: any) {
     if (error?.code === 'P2002') {
-      const existing = await prisma.user.findUnique({
-        where: { email: authEmail },
-        include: USER_INCLUDE,
-      });
-      if (existing) return existing;
+      try {
+        const supabase = await createClient();
+        const authUser = await resolveAuthUser(supabase);
+        const authEmail = authUser?.email?.trim().toLowerCase();
+        if (authEmail) {
+          const existing = await prisma.user.findUnique({
+            where: { email: authEmail },
+            include: USER_INCLUDE,
+          });
+          if (existing) return existing;
+        }
+      } catch {
+        // Swallow secondary lookup failures and fall through to null.
+      }
     }
     console.error('[auth] Failed to resolve current user:', error?.message || error);
     return null;

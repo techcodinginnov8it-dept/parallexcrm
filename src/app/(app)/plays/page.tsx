@@ -4,17 +4,17 @@ import { useEffect, useMemo, useState } from 'react';
 import useSWR from 'swr';
 
 type WorkflowStatus = 'draft' | 'active' | 'paused';
-type TriggerType = 'new_lead' | 'lead_stage_changed' | 'sequence_completed' | 'task_completed' | 'inbound_form';
+type TriggerType = 'new_lead' | 'lead_stage_changed' | 'sequence_completed' | 'task_completed' | 'inbound_form' | 'email_opened' | 'email_clicked' | 'email_replied' | 'meeting_booked' | 'tag_added' | 'tag_removed';
 type TriggerMode = 'event' | 'webhook' | 'schedule';
 type ConditionField = 'stage' | 'owner' | 'company_size' | 'country';
 type ConditionOperator = 'is' | 'is_not' | 'contains';
-type ActionType = 'send_email' | 'create_task' | 'enroll_sequence' | 'update_stage' | 'notify_owner';
+type ActionType = 'send_email' | 'create_task' | 'enroll_sequence' | 'update_stage' | 'notify_owner' | 'call_webhook' | 'add_tag' | 'remove_tag' | 'remove_sequence' | 'create_deal' | 'assign_user' | 'add_note' | 'send_sms' | 'ai_generate' | 'update_field';
 type BranchMode = 'continue' | 'exit';
 type ActionBranch = 'always' | 'true' | 'false';
 
 type WorkflowCondition = { id: string; field: ConditionField; operator: ConditionOperator; value: string; onTrue: BranchMode; onFalse: BranchMode; branch: ActionBranch };
 type WorkflowDelay = { id: string; days: number; branch: ActionBranch };
-type WorkflowAction = { id: string; type: ActionType; value: string; branch: ActionBranch };
+type WorkflowAction = { id: string; type: ActionType; value: string; branch: ActionBranch; subject?: string; body?: string; stage?: string; tag?: string; url?: string; sequence_id?: string; };
 type FlowItem =
   | { key: string; kind: 'condition'; condition: WorkflowCondition }
   | { key: string; kind: 'delay'; delay: WorkflowDelay };
@@ -28,6 +28,9 @@ type Workflow = {
   webhookPath: string;
   intervalMinutes: number;
   nextRunAt: string | null;
+  targetEntity?: 'people' | 'companies' | 'deals';
+  intervalType?: 'once' | 'recurring';
+  intervalDays?: number[];
   delays: WorkflowDelay[];
   flowOrder: string[];
   conditions: WorkflowCondition[];
@@ -59,6 +62,12 @@ const triggerLabels: Record<TriggerType, string> = {
   sequence_completed: 'Sequence completed',
   task_completed: 'Task completed',
   inbound_form: 'Inbound form submitted',
+  email_opened: 'Email opened',
+  email_clicked: 'Email clicked',
+  email_replied: 'Email replied',
+  meeting_booked: 'Meeting booked',
+  tag_added: 'Tag added',
+  tag_removed: 'Tag removed',
 };
 const triggerModeLabels: Record<TriggerMode, string> = {
   event: 'Event trigger',
@@ -82,6 +91,16 @@ const actionLabels: Record<ActionType, string> = {
   enroll_sequence: 'Enroll in sequence',
   update_stage: 'Update stage',
   notify_owner: 'Notify owner',
+  call_webhook: 'Call webhook',
+  add_tag: 'Add tag',
+  remove_tag: 'Remove tag',
+  remove_sequence: 'Remove from sequence',
+  create_deal: 'Create deal',
+  assign_user: 'Assign to user',
+  add_note: 'Add note',
+  send_sms: 'Send SMS',
+  ai_generate: 'AI Action',
+  update_field: 'Update field',
 };
 
 const normalizeBranch = (value: unknown): ActionBranch => {
@@ -146,6 +165,9 @@ const normalizeWorkflow = (workflow: any): Workflow => ({
   webhookPath: String(workflow?.webhookPath || ''),
   intervalMinutes: Math.max(1, Number(workflow?.intervalMinutes || 60)),
   nextRunAt: workflow?.nextRunAt ? String(workflow.nextRunAt) : null,
+  targetEntity: workflow?.targetEntity === 'companies' || workflow?.targetEntity === 'deals' ? workflow.targetEntity : 'people',
+  intervalType: workflow?.intervalType === 'recurring' ? 'recurring' : 'once',
+  intervalDays: Array.isArray(workflow?.intervalDays) ? workflow.intervalDays : [],
   delays: Array.isArray(workflow?.delays)
     ? workflow.delays.map((item: any, index: number) => ({
         id: String(item?.id || `delay-${index + 1}`),
@@ -182,6 +204,12 @@ const normalizeWorkflow = (workflow: any): Workflow => ({
         type: actionLabels[item?.type as ActionType] ? item.type : 'send_email',
         value: String(item?.value || item?.sequence_id || item?.stage || ''),
         branch: item?.branch === 'true' || item?.branch === 'false' ? item.branch : 'always',
+        subject: item?.subject ? String(item.subject) : '',
+        body: item?.body ? String(item.body) : '',
+        stage: item?.stage ? String(item.stage) : '',
+        tag: item?.tag ? String(item.tag) : '',
+        url: item?.url ? String(item.url) : '',
+        sequence_id: item?.sequence_id ? String(item.sequence_id) : '',
       }))
     : [],
   createdAt: String(workflow?.createdAt || new Date(0).toISOString()),
@@ -846,7 +874,70 @@ export default function PlaysPage() {
                           <select className="form-input" value={action.type} onChange={(e) => updateAction(action.id, { type: e.target.value as ActionType })}>
                             {Object.entries(actionLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                           </select>
-                          <input className="form-input" value={action.value} onChange={(e) => updateAction(action.id, { value: e.target.value })} placeholder="Action value" />
+                          {action.type === 'send_email' && (
+                            <>
+                              <input className="form-input" value={action.subject || ''} onChange={(e) => updateAction(action.id, { subject: e.target.value })} placeholder="Email subject" />
+                              <textarea className="form-textarea" rows={3} value={action.body || ''} onChange={(e) => updateAction(action.id, { body: e.target.value })} placeholder="Email body" />
+                            </>
+                          )}
+                          {action.type === 'create_task' && (
+                            <>
+                              <input className="form-input" value={action.value || ''} onChange={(e) => updateAction(action.id, { value: e.target.value })} placeholder="Task title" />
+                              <textarea className="form-textarea" rows={2} value={action.body || ''} onChange={(e) => updateAction(action.id, { body: e.target.value })} placeholder="Task description (optional)" />
+                            </>
+                          )}
+                          {action.type === 'update_stage' && (
+                            <select className="form-input" value={action.stage || action.value || ''} onChange={(e) => updateAction(action.id, { stage: e.target.value, value: e.target.value })}>
+                              <option value="">Select a stage</option>
+                              <option value="new">New</option>
+                              <option value="contacted">Contacted</option>
+                              <option value="qualified">Qualified</option>
+                              <option value="customer">Customer</option>
+                              <option value="churned">Churned</option>
+                            </select>
+                          )}
+                          {action.type === 'enroll_sequence' && (
+                            <input className="form-input" value={action.sequence_id || action.value || ''} onChange={(e) => updateAction(action.id, { sequence_id: e.target.value, value: e.target.value })} placeholder="Sequence ID" />
+                          )}
+                          {action.type === 'call_webhook' && (
+                            <input className="form-input" value={action.url || ''} onChange={(e) => updateAction(action.id, { url: e.target.value })} placeholder="Webhook URL (https://...)" />
+                          )}
+                          {action.type === 'add_tag' && (
+                            <input className="form-input" value={action.tag || ''} onChange={(e) => updateAction(action.id, { tag: e.target.value })} placeholder="Tag name (e.g. enterprise)" />
+                          )}
+                          {action.type === 'notify_owner' && (
+                            <input className="form-input" value={action.value || ''} onChange={(e) => updateAction(action.id, { value: e.target.value })} placeholder="Notification message" />
+                          )}
+                          {action.type === 'remove_tag' && (
+                            <input className="form-input" value={action.tag || action.value || ''} onChange={(e) => updateAction(action.id, { tag: e.target.value, value: e.target.value })} placeholder="Tag name to remove" />
+                          )}
+                          {action.type === 'remove_sequence' && (
+                            <input className="form-input" value={action.sequence_id || action.value || ''} onChange={(e) => updateAction(action.id, { sequence_id: e.target.value, value: e.target.value })} placeholder="Sequence ID to unenroll" />
+                          )}
+                          {action.type === 'create_deal' && (
+                            <input className="form-input" value={action.value || ''} onChange={(e) => updateAction(action.id, { value: e.target.value })} placeholder="Deal name" />
+                          )}
+                          {action.type === 'assign_user' && (
+                            <input className="form-input" value={action.value || ''} onChange={(e) => updateAction(action.id, { value: e.target.value })} placeholder="User Email or ID" />
+                          )}
+                          {action.type === 'add_note' && (
+                            <textarea className="form-textarea" rows={3} value={action.body || ''} onChange={(e) => updateAction(action.id, { body: e.target.value })} placeholder="Note content" />
+                          )}
+                          {action.type === 'send_sms' && (
+                            <textarea className="form-textarea" rows={2} value={action.body || ''} onChange={(e) => updateAction(action.id, { body: e.target.value })} placeholder="SMS Message" />
+                          )}
+                          {action.type === 'ai_generate' && (
+                            <>
+                              <textarea className="form-textarea" rows={3} value={action.body || ''} onChange={(e) => updateAction(action.id, { body: e.target.value })} placeholder="AI Prompt context" />
+                              <input className="form-input" value={action.value || ''} onChange={(e) => updateAction(action.id, { value: e.target.value })} placeholder="Output field name" />
+                            </>
+                          )}
+                          {action.type === 'update_field' && (
+                            <>
+                              <input className="form-input" value={action.value || ''} onChange={(e) => updateAction(action.id, { value: e.target.value })} placeholder="Field name (e.g. title)" />
+                              <input className="form-input" value={action.body || ''} onChange={(e) => updateAction(action.id, { body: e.target.value })} placeholder="New value" />
+                            </>
+                          )}
                           <select className="form-input" value={action.branch} onChange={(e) => updateAction(action.id, { branch: e.target.value as ActionBranch })}>
                             <option value="always">Shared path</option>
                             <option value="true">YES path</option>
@@ -887,7 +978,29 @@ export default function PlaysPage() {
                   {selectedWorkflow.triggerType === 'webhook' && <input className="form-input" value={selectedWorkflow.webhookPath} onChange={(e) => updateWorkflow({ webhookPath: e.target.value })} placeholder="Webhook path" />}
                   {selectedWorkflow.triggerType === 'schedule' && (
                     <>
-                      <input className="form-input" type="number" min={1} value={selectedWorkflow.intervalMinutes} onChange={(e) => updateWorkflow({ intervalMinutes: Math.max(1, Number(e.target.value || 1)) })} placeholder="Interval minutes" />
+                      <select className="form-input" value={selectedWorkflow.targetEntity || 'people'} onChange={(e) => updateWorkflow({ targetEntity: e.target.value as any })}>
+                        <option value="people">Run on People</option>
+                        <option value="companies">Run on Companies</option>
+                        <option value="deals">Run on Deals</option>
+                      </select>
+                      <select className="form-input" value={selectedWorkflow.intervalType || 'recurring'} onChange={(e) => updateWorkflow({ intervalType: e.target.value as any })}>
+                        <option value="once">Run only once</option>
+                        <option value="recurring">Run recurring</option>
+                      </select>
+                      {selectedWorkflow.intervalType === 'recurring' && (
+                        <>
+                          <input className="form-input" type="number" min={1} value={selectedWorkflow.intervalMinutes} onChange={(e) => updateWorkflow({ intervalMinutes: Math.max(1, Number(e.target.value || 1)) })} placeholder="Interval weeks..." />
+                          <div style={{ display: 'flex', gap: '4px', overflowX: 'auto', padding: '4px 0' }}>
+                            {['S','M','T','W','T','F','S'].map((day, i) => {
+                              const days = selectedWorkflow.intervalDays || [];
+                              const isActive = days.includes(i);
+                              return (
+                                <button key={i} className={`btn btn-sm ${isActive ? 'btn-primary' : 'btn-secondary'}`} onClick={() => updateWorkflow({ intervalDays: isActive ? days.filter(d => d !== i) : [...days, i] })} style={{ minWidth: '32px' }}>{day}</button>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
                       <input className="form-input" type="datetime-local" value={selectedWorkflow.nextRunAt ? new Date(selectedWorkflow.nextRunAt).toISOString().slice(0, 16) : ''} onChange={(e) => updateWorkflow({ nextRunAt: e.target.value ? new Date(e.target.value).toISOString() : null })} />
                     </>
                   )}
@@ -958,12 +1071,34 @@ export default function PlaysPage() {
                   </>
                 )}
                 {selectedWorkflow.triggerType === 'webhook' && <input className="form-input" value={selectedWorkflow.webhookPath} onChange={(e) => updateWorkflow({ webhookPath: e.target.value })} placeholder="Webhook path" />}
-                {selectedWorkflow.triggerType === 'schedule' && (
-                  <>
-                    <input className="form-input" type="number" min={1} value={selectedWorkflow.intervalMinutes} onChange={(e) => updateWorkflow({ intervalMinutes: Math.max(1, Number(e.target.value || 1)) })} placeholder="Interval minutes" />
-                    <input className="form-input" type="datetime-local" value={selectedWorkflow.nextRunAt ? new Date(selectedWorkflow.nextRunAt).toISOString().slice(0, 16) : ''} onChange={(e) => updateWorkflow({ nextRunAt: e.target.value ? new Date(e.target.value).toISOString() : null })} />
-                  </>
-                )}
+                  {selectedWorkflow.triggerType === 'schedule' && (
+                    <>
+                      <select className="form-input" value={selectedWorkflow.targetEntity || 'people'} onChange={(e) => updateWorkflow({ targetEntity: e.target.value as any })}>
+                        <option value="people">Run on People</option>
+                        <option value="companies">Run on Companies</option>
+                        <option value="deals">Run on Deals</option>
+                      </select>
+                      <select className="form-input" value={selectedWorkflow.intervalType || 'recurring'} onChange={(e) => updateWorkflow({ intervalType: e.target.value as any })}>
+                        <option value="once">Run only once</option>
+                        <option value="recurring">Run recurring</option>
+                      </select>
+                      {selectedWorkflow.intervalType === 'recurring' && (
+                        <>
+                          <input className="form-input" type="number" min={1} value={selectedWorkflow.intervalMinutes} onChange={(e) => updateWorkflow({ intervalMinutes: Math.max(1, Number(e.target.value || 1)) })} placeholder="Interval weeks..." />
+                          <div style={{ display: 'flex', gap: '4px', overflowX: 'auto', padding: '4px 0' }}>
+                            {['S','M','T','W','T','F','S'].map((day, i) => {
+                              const days = selectedWorkflow.intervalDays || [];
+                              const isActive = days.includes(i);
+                              return (
+                                <button key={i} className={`btn btn-sm ${isActive ? 'btn-primary' : 'btn-secondary'}`} onClick={() => updateWorkflow({ intervalDays: isActive ? days.filter(d => d !== i) : [...days, i] })} style={{ minWidth: '32px' }}>{day}</button>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
+                      <input className="form-input" type="datetime-local" value={selectedWorkflow.nextRunAt ? new Date(selectedWorkflow.nextRunAt).toISOString().slice(0, 16) : ''} onChange={(e) => updateWorkflow({ nextRunAt: e.target.value ? new Date(e.target.value).toISOString() : null })} />
+                    </>
+                  )}
               </div>
             ) : <div className="workflow-panel-empty">Create a workflow to configure its trigger.</div>}
           </div>
